@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FLAG_REQUEST_ACCESSIBILITY_BUTTON 을 요청하지 않으므로
+  접근성 바로가기(음량 키 / 접근성 버튼)는 이 서비스를 켜고 끄는 동작을 한다.
+  canRetrieveWindowContent 는 이벤트의 windowId 를 받기 위해 필요하다.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeViewScrolled"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagIncludeNotImportantViews"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/service_description"
+    android:notificationTimeout="0"
+    android:settingsActivity="com.qa.autocapture.MainActivity"
+    android:summary="@string/service_summary" />

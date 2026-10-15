@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QA 증적 캡처</string>
+    <string name="service_summary">방문한 화면을 전체 길이 PNG로 자동 저장</string>
+    <string name="service_description">QA 테스트 중 방문한 화면을 스크롤 끝까지 이어붙여 화면마다 PNG 1장으로 저장합니다. 화면의 플로팅 버튼으로 기록을 시작·정지합니다. 접근성 바로가기(음량 버튼 길게 누르기 또는 접근성 버튼)로 이 서비스를 켜고 끌 수 있습니다. 저장 위치: 내장 저장공간/Documents/QAEvidence</string>
+</resources>

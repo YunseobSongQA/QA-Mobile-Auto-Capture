@@ -1,0 +1,88 @@
+# main 에 push 하면: 단위테스트 → 서명된 release APK 빌드 → GitHub Release "latest"(prerelease)에 덮어쓰기 업로드
+# 다운로드 주소는 항상 https://github.com/<owner>/<repo>/releases/download/latest/qa-capture.apk
+name: Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 업로드가 서로 덮어쓰지 않도록 한 번에 하나씩 실행한다
+concurrency:
+  group: release-latest
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Gradle 캐시
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: 서명 Secrets 확인
+        run: |
+          missing=""
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::서명용 GitHub Secrets 가 없습니다:$missing — README 의 '서명 키 준비' 절을 참고해 등록하세요."
+            exit 1
+          fi
+
+      - name: 단위테스트
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest
+
+      - name: Release APK 빌드
+        run: |
+          export KEYSTORE_PATH="$RUNNER_TEMP/release.jks"
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          ./gradlew assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk qa-capture.apk
+          rm -f "$KEYSTORE_PATH"
+
+      - name: 테스트 리포트 보관
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: GitHub Release "latest" 에 업로드
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="main 최신 커밋 자동 빌드
+          - 버전: 1.0.${GITHUB_RUN_NUMBER} (versionCode ${GITHUB_RUN_NUMBER})
+          - 커밋: ${GITHUB_SHA}
+          - 다운로드: https://github.com/${GITHUB_REPOSITORY}/releases/download/latest/qa-capture.apk"
+
+          # latest 태그를 이번 커밋으로 옮긴다
+          git tag -f latest
+          git push -f origin refs/tags/latest
+
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --prerelease --title "최신 빌드" --notes "$notes"
+          else
+            gh release create latest --prerelease --title "최신 빌드" --notes "$notes"
+          fi
+          gh release upload latest qa-capture.apk --clobber

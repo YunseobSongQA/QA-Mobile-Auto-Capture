@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 단순 벡터 아이콘: 세로로 긴 문서 + 녹화 점 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#1565C0"
+        android:pathData="M54,4a50,50 0,1 1,0 100a50,50 0,1 1,0 -100z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M38,22h32a4,4 0,0 1,4 4v56a4,4 0,0 1,-4 4h-32a4,4 0,0 1,-4 -4v-56a4,4 0,0 1,4 -4z" />
+    <path
+        android:fillColor="#90CAF9"
+        android:pathData="M40,32h28v4h-28zM40,42h28v4h-28zM40,52h20v4h-20zM40,62h28v4h-28z" />
+    <path
+        android:fillColor="#E53935"
+        android:pathData="M70,66a12,12 0,1 1,0 24a12,12 0,1 1,0 -24z" />
+</vector>
