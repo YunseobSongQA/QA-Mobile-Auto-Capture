@@ -10,21 +10,26 @@ import android.hardware.HardwareBuffer
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedOutputStream
+import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
+import java.io.OutputStreamWriter
+import java.io.Writer
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.Executors
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -41,11 +46,15 @@ class ScreenRecord(
     val stitch: String,
 )
 
+/** 세션 중 감지한 토스트(manifest 의 toasts 항목). [screen] = 그때 화면의 className. */
+class ToastRecord(val at: Long, val packageName: String, val text: String, val screen: String?)
+
 /** 세션 1개의 기록. 내부 session.json 과 공개 manifest.json 의 원본. */
 class SessionData(val id: String, val startedAt: Long) {
     var endedAt: Long? = null
     var ended = false
     val screens = mutableListOf<ScreenRecord>()
+    val toasts = mutableListOf<ToastRecord>()
 }
 
 /** 화면 구간의 임시 정보(구간 폴더의 screen.json). */
@@ -203,6 +212,16 @@ class EvidenceStore(context: Context) {
                     stitch = s.getString("stitch"),
                 )
             }
+            val toastArr = o.optJSONArray("toasts") ?: JSONArray()
+            for (i in 0 until toastArr.length()) {
+                val t = toastArr.getJSONObject(i)
+                toasts += ToastRecord(
+                    at = parseTime(t.getString("at")),
+                    packageName = t.getString("packageName"),
+                    text = t.getString("text"),
+                    screen = t.optString("screen").takeIf { it.isNotEmpty() && it != "null" },
+                )
+            }
         }
     } catch (e: Exception) {
         null
@@ -224,6 +243,16 @@ class EvidenceStore(context: Context) {
                     .put("stitch", s.stitch),
             )
         }
+        val toasts = JSONArray()
+        for (t in session.toasts) {
+            toasts.put(
+                JSONObject()
+                    .put("at", isoTime(t.at))
+                    .put("packageName", t.packageName)
+                    .put("text", t.text)
+                    .put("screen", t.screen ?: JSONObject.NULL),
+            )
+        }
         return JSONObject()
             .put("session", session.id)
             .put("startedAt", isoTime(session.startedAt))
@@ -238,6 +267,7 @@ class EvidenceStore(context: Context) {
             )
             .put("app", JSONObject().put("versionName", info.versionName).put("versionCode", info.longVersionCode))
             .put("screens", screens)
+            .put("toasts", toasts)
     }
 
     // ── MediaStore ────────────────────────────────────────────────
@@ -259,6 +289,20 @@ class EvidenceStore(context: Context) {
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
             throw e
+        }
+    }
+
+    /** 계속 덧붙여 쓸 MediaStore 파일을 만든다(디버그 로그). 스트림은 호출자가 닫는다. */
+    fun createStream(relativePath: String, name: String, mime: String): OutputStream {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+        }
+        val uri = resolver.insert(collection, values) ?: throw IOException("MediaStore 항목을 만들 수 없습니다: $relativePath$name")
+        return resolver.openOutputStream(uri) ?: run {
+            resolver.delete(uri, null, null)
+            throw IOException("파일을 열 수 없습니다: $name")
         }
     }
 
@@ -298,6 +342,7 @@ class EvidenceStore(context: Context) {
             while (c.moveToNext()) items += ContentUris.withAppendedId(collection, c.getLong(0)) to c.getString(1)
         }
         if (items.isEmpty()) throw IOException("저장된 파일이 없습니다")
+        find(DEBUG_PATH, "$sessionId.txt")?.let { items += it to "debug_log.txt" }
 
         val zipName = "$sessionId.zip"
         find(ROOT_PATH, zipName)?.let { resolver.delete(it, null, null) }
@@ -319,8 +364,14 @@ class EvidenceStore(context: Context) {
         private const val SESSION_FILE = "session.json"
         private const val MANIFEST_FILE = "manifest.json"
 
+        /** 구간 폴더 안에서 "토스트 순간" 프레임을 두는 하위 폴더(스티칭 대상 아님). */
+        const val TOAST_DIR = "toast"
+
         /** 결과물 최상위 폴더(MediaStore RELATIVE_PATH). */
         val ROOT_PATH = "${Environment.DIRECTORY_DOCUMENTS}/QAEvidence/"
+
+        /** 디버그 로그 폴더. 세션별 {세션}.txt */
+        val DEBUG_PATH = "${ROOT_PATH}debug/"
 
         fun sessionPath(sessionId: String) = "$ROOT_PATH$sessionId/"
 
@@ -345,5 +396,91 @@ class EvidenceStore(context: Context) {
 
         fun format(millis: Long, pattern: String): String =
             DateTimeFormatter.ofPattern(pattern, Locale.ROOT).format(Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()))
+    }
+}
+
+/** 메인 화면의 스위치 값. 서비스와 같은 프로세스라 SharedPreferences 로 공유한다. */
+class Options(context: Context) {
+    private val prefs = context.applicationContext.getSharedPreferences("options", Context.MODE_PRIVATE)
+
+    /** 토스트가 뜬 순간도 별도 PNG(…_toast.png)로 저장한다. */
+    var saveToastShot: Boolean
+        get() = prefs.getBoolean(KEY_TOAST_SHOT, false)
+        set(value) = prefs.edit().putBoolean(KEY_TOAST_SHOT, value).apply()
+
+    /** 기록 중 받은 접근성 이벤트를 디버그 로그로 저장한다. */
+    var debugLog: Boolean
+        get() = prefs.getBoolean(KEY_DEBUG_LOG, false)
+        set(value) = prefs.edit().putBoolean(KEY_DEBUG_LOG, value).apply()
+
+    private companion object {
+        const val KEY_TOAST_SHOT = "save_toast_shot"
+        const val KEY_DEBUG_LOG = "debug_log"
+    }
+}
+
+/**
+ * 기록 중 받은 접근성 이벤트를 Documents/QAEvidence/debug/{세션}.txt 에 한 줄씩 쓴다(탭 구분).
+ * 쓰기는 전용 스레드에서 하고 1초마다 flush 해 비정상 종료 때도 대부분 남긴다.
+ */
+class DebugLog(context: Context, sessionId: String) : Closeable {
+
+    /** io 스레드에서만 쓴다. */
+    private var writer: Writer? = null
+    private var lastFlush = 0L
+
+    init {
+        val store = EvidenceStore(context)
+        io.execute {
+            try {
+                val out = store.createStream(EvidenceStore.DEBUG_PATH, "$sessionId.txt", "text/plain")
+                writer = BufferedWriter(OutputStreamWriter(out, Charsets.UTF_8), 64 * 1024).apply {
+                    write("# QA 증적 캡처 디버그 로그 / 세션 $sessionId\n")
+                    write("# 시각\t이벤트 타입\t패키지\t클래스\t텍스트\t기타\n")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "디버그 로그를 만들 수 없습니다", e)
+            }
+        }
+    }
+
+    /** 한 줄 기록. 이벤트 객체는 재사용되므로 호출자가 값을 꺼내서 넘긴다. */
+    fun log(millis: Long, type: String, packageName: CharSequence?, className: CharSequence?, text: CharSequence?, extra: String = "") {
+        io.execute {
+            val w = writer ?: return@execute
+            try {
+                w.write(TIME.format(Instant.ofEpochMilli(millis)))
+                for (field in arrayOf(type, packageName, className, text, extra)) {
+                    w.write('\t'.code)
+                    w.write(clean(field))
+                }
+                w.write('\n'.code)
+                val now = SystemClock.uptimeMillis()
+                if (now - lastFlush >= FLUSH_INTERVAL_MS) {
+                    w.flush()
+                    lastFlush = now
+                }
+            } catch (e: IOException) {
+                Log.w(TAG, "디버그 로그 쓰기 실패", e)
+                runCatching { w.close() }
+                writer = null
+            }
+        }
+    }
+
+    override fun close() {
+        io.execute {
+            runCatching { writer?.close() }
+            writer = null
+        }
+    }
+
+    private companion object {
+        const val TAG = "DebugLog"
+        const val FLUSH_INTERVAL_MS = 1000L
+        val io = Executors.newSingleThreadExecutor { Thread(it, "qa-debug") }
+        val TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.ROOT).withZone(ZoneId.systemDefault())
+
+        fun clean(s: CharSequence?): String = s?.toString()?.replace('\t', ' ')?.replace('\n', ' ')?.replace('\r', ' ') ?: ""
     }
 }

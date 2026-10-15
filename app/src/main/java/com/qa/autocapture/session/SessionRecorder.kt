@@ -12,6 +12,7 @@ import com.qa.autocapture.storage.EvidenceStore
 import com.qa.autocapture.storage.ScreenInfo
 import com.qa.autocapture.storage.ScreenRecord
 import com.qa.autocapture.storage.SessionData
+import com.qa.autocapture.storage.ToastRecord
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.Executors
@@ -43,6 +44,7 @@ class SessionRecorder(
 
     private var segmentDir: File? = null
     private var frameIndex = 0
+    private var toastIndex = 0
 
     init {
         val now = System.currentTimeMillis()
@@ -57,6 +59,7 @@ class SessionRecorder(
         closeSegment()
         currentSegment++
         frameIndex = 0
+        toastIndex = 0
         val dir = store.segmentDir(session.id, currentSegment)
         segmentDir = dir
         val info = ScreenInfo(packageName, className, System.currentTimeMillis())
@@ -72,6 +75,26 @@ class SessionRecorder(
         }
         val index = frameIndex++
         frameExecutor.execute { store.writeFrame(dir, index, buffer, colorSpace) }
+    }
+
+    /** 토스트가 뜬 순간의 화면. 스티칭하지 않고 화면 저장 때 …_toast.png 로 따로 남긴다. 버퍼 소유권을 넘겨받는다. */
+    fun addToastFrame(buffer: HardwareBuffer, colorSpace: ColorSpace?) {
+        val dir = segmentDir
+        if (dir == null) {
+            buffer.close()
+            return
+        }
+        val index = toastIndex++
+        frameExecutor.execute { store.writeFrame(File(dir, EvidenceStore.TOAST_DIR), index, buffer, colorSpace) }
+    }
+
+    /** 토스트 문구를 세션 기록(manifest 의 toasts)에 남긴다. */
+    fun logToast(at: Long, packageName: String, text: String, screen: String?) {
+        val s = session
+        afterFrames {
+            s.toasts += ToastRecord(at, packageName, text, screen)
+            store.writeSession(s)
+        }
     }
 
     /** 세션을 끝낸다. 남은 저장이 모두 끝나면 [onDone] 을 (저장된 화면 수와 함께) 메인 스레드에서 부른다. */
@@ -156,7 +179,8 @@ class SessionRecorder(
         }
 
         /**
-         * 구간 폴더의 프레임을 스티칭해 PNG 로 저장하고 manifest 에 항목을 추가한다(스티칭 스레드 전용).
+         * 구간 폴더의 프레임을 스티칭해 PNG 로 저장하고(토스트 순간 프레임은 …_toast.png 로 그대로)
+         * manifest 에 항목을 추가한다(스티칭 스레드 전용).
          * 저장한 화면이 있으면 true. 실패 시 예외를 던지고 임시 프레임은 다음 복구를 위해 남긴다.
          */
         private fun saveScreen(
@@ -169,12 +193,18 @@ class SessionRecorder(
         ): Boolean {
             val info = store.readScreenInfo(dir)
             val frameFiles = store.listFrames(dir)
-            if (info == null || frameFiles.isEmpty()) {
+            val toastFiles = store.listFrames(File(dir, EvidenceStore.TOAST_DIR))
+            if (info == null || (frameFiles.isEmpty() && toastFiles.isEmpty())) {
                 dir.deleteRecursively()
                 return false
             }
+            val seq = session.screens.size + 1
+            val base = EvidenceStore.baseName(seq, info.packageName, info.className, info.enteredAt)
+            val path = EvidenceStore.sessionPath(session.id)
+            val names = ArrayList<String>()
+            var stitch = "none" // 안정된 프레임 없이 토스트 순간만 있는 경우
 
-            EvidenceStore.FrameReader().use { reader ->
+            if (frameFiles.isNotEmpty()) EvidenceStore.FrameReader().use { reader ->
                 // 1) 프레임마다 행 해시만 남긴다(픽셀 배열은 재사용)
                 val frames = ArrayList<Stitcher.Frame>(frameFiles.size)
                 val usable = ArrayList<File>(frameFiles.size)
@@ -185,40 +215,47 @@ class SessionRecorder(
                     frames += Stitcher.Frame(reader.width, reader.height, Stitcher.rowHashes(px, reader.width, reader.height))
                     usable += f
                 }
-                if (frames.isEmpty()) {
-                    dir.deleteRecursively()
-                    return false
-                }
-
-                // 2) 합성 계획 → part 마다 행 단위로 PNG 렌더링
-                val plan = Stitcher.plan(frames, topInset, bottomInset)
-                val seq = session.screens.size + 1
-                val base = EvidenceStore.baseName(seq, info.packageName, info.className, info.enteredAt)
-                val names = plan.parts.mapIndexed { i, part ->
-                    val name = if (i == 0) "$base.png" else "${base}_part${i + 1}.png"
-                    store.saveFile(EvidenceStore.sessionPath(session.id), name, "image/png") { out ->
-                        renderPart(part, out) { frame, into ->
-                            val px = reader.read(usable[frame], into)
-                                ?: throw IOException("프레임을 읽을 수 없습니다: ${usable[frame].name}")
-                            if (px !== into) px.copyInto(into)
+                if (frames.isNotEmpty()) {
+                    // 2) 합성 계획 → part 마다 행 단위로 PNG 렌더링
+                    val plan = Stitcher.plan(frames, topInset, bottomInset)
+                    plan.parts.forEachIndexed { i, part ->
+                        val name = if (i == 0) "$base.png" else "${base}_part${i + 1}.png"
+                        store.saveFile(path, name, "image/png") { out ->
+                            renderPart(part, out) { frame, into ->
+                                val px = reader.read(usable[frame], into)
+                                    ?: throw IOException("프레임을 읽을 수 없습니다: ${usable[frame].name}")
+                                if (px !== into) px.copyInto(into)
+                            }
                         }
+                        names += name
                     }
-                    name
+                    stitch = plan.result
                 }
-
-                // 3) manifest 갱신
-                session.screens += ScreenRecord(
-                    seq = seq,
-                    files = names,
-                    packageName = info.packageName,
-                    className = info.className,
-                    enteredAt = info.enteredAt,
-                    exitedAt = exitedAt,
-                    frames = frameFiles.size,
-                    stitch = plan.result,
-                )
-                store.writeSession(session)
             }
+
+            // 3) 토스트 순간 프레임은 이미 PNG 이므로 그대로 복사
+            toastFiles.forEachIndexed { i, f ->
+                val name = if (i == 0) "${base}_toast.png" else "${base}_toast${i + 1}.png"
+                store.saveFile(path, name, "image/png") { out -> f.inputStream().use { it.copyTo(out) } }
+                names += name
+            }
+            if (names.isEmpty()) {
+                dir.deleteRecursively()
+                return false
+            }
+
+            // 4) manifest 갱신
+            session.screens += ScreenRecord(
+                seq = seq,
+                files = names,
+                packageName = info.packageName,
+                className = info.className,
+                enteredAt = info.enteredAt,
+                exitedAt = exitedAt,
+                frames = frameFiles.size,
+                stitch = stitch,
+            )
+            store.writeSession(session)
             dir.deleteRecursively()
             return true
         }

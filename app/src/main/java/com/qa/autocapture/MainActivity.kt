@@ -14,15 +14,17 @@ import android.view.accessibility.AccessibilityManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import com.qa.autocapture.capture.CaptureService
 import com.qa.autocapture.storage.EvidenceStore
+import com.qa.autocapture.storage.Options
 import com.qa.autocapture.storage.SessionData
 
 /**
  * 앱 메인 화면(레이아웃 XML 없이 코드로 구성).
- * 서비스 상태, 접근성 설정/앱 정보 이동, "제한된 설정 허용" 안내, 세션 목록과 공유 버튼.
+ * 서비스 상태, 접근성 설정/앱 정보 이동, "제한된 설정 허용" 안내, 옵션 스위치, 세션 목록과 공유 버튼.
  */
 class MainActivity : Activity() {
 
@@ -69,7 +71,27 @@ class MainActivity : Activity() {
             },
         )
 
-        // 3) 세션 목록
+        // 3) 옵션
+        val options = Options(this)
+        content.addView(heading("옵션"))
+        content.addView(
+            option(
+                "토스트 뜬 순간도 별도 저장",
+                "토스트가 뜨면 그 순간 화면을 1장 더 저장합니다(파일명 끝 _toast). " +
+                    "기본 캡처는 토스트가 사라진 뒤에 찍고, 토스트 문구는 manifest.json 에 기록합니다.",
+                options.saveToastShot,
+            ) { options.saveToastShot = it },
+        )
+        content.addView(
+            option(
+                "디버그 로그",
+                "기록 중 받은 접근성 이벤트(시각, 종류, 패키지, 클래스, 텍스트)를 " +
+                    "내장 저장공간/${EvidenceStore.DEBUG_PATH}{세션}.txt 로 저장합니다. 다음 기록 시작부터 적용됩니다.",
+                options.debugLog,
+            ) { options.debugLog = it },
+        )
+
+        // 4) 세션 목록
         content.addView(heading("저장된 세션"))
         content.addView(text("저장 위치: 내장 저장공간/${EvidenceStore.ROOT_PATH}", 13f))
         sessionList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -182,6 +204,20 @@ class MainActivity : Activity() {
         textSize = size
         if (bold) typeface = Typeface.DEFAULT_BOLD
         setLineSpacing(0f, 1.15f)
+    }
+
+    private fun option(title: String, help: String, checked: Boolean, onChange: (Boolean) -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(0, dp(4), 0, dp(8))
+        addView(
+            Switch(this@MainActivity).apply {
+                text = title
+                textSize = 16f
+                isChecked = checked
+                setOnCheckedChangeListener { _, on -> onChange(on) }
+            },
+        )
+        addView(text(help, 13f))
     }
 
     private fun button(s: String, onClick: () -> Unit) = Button(this).apply {

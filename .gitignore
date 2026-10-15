@@ -6,6 +6,7 @@ local.properties
 
 # 서명 키 — 절대 커밋하지 않는다
 *.jks
+*.b64
 *.keystore
 *.p12
 keystore.properties
