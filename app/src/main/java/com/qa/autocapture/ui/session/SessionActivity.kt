@@ -2,19 +2,15 @@ package com.qa.autocapture.ui.session
 
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ActivityNotFoundException
-import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.MediaStore
 import android.text.TextUtils
 import android.util.LruCache
 import android.util.Size
@@ -38,6 +34,7 @@ import com.qa.autocapture.storage.Times
 import com.qa.autocapture.ui.common.Ui
 import com.qa.autocapture.ui.common.Ui.ButtonStyle
 import com.qa.autocapture.ui.common.Ui.Type
+import com.qa.autocapture.ui.viewer.ImageViewerActivity
 import java.util.concurrent.Executors
 
 /** 세션 1개 열기: 요약, zip 공유, 세션 로그 보기, 저장한 이미지 목록(누르면 이미지 보기). */
@@ -77,7 +74,7 @@ class SessionActivity : Activity() {
             addHeaderView(header(), null, false)
             adapter = this@SessionActivity.adapter
             setOnItemClickListener { _, _, position, _ ->
-                images.getOrNull(position - headerViewsCount)?.let { view(it) }
+                images.getOrNull(position - headerViewsCount)?.let { open(it) }
             }
         }
         val title = s?.let { Times.format(it.startedAt, "yyyy-MM-dd HH:mm:ss") } ?: sessionId
@@ -183,20 +180,10 @@ class SessionActivity : Activity() {
         }
     }
 
-    /** 기본 이미지 보기 앱으로 연다. 이미지 컬렉션 URI 로 넘겨야 갤러리 앱이 받는다. */
-    private fun view(file: StoredFile) {
-        val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(imageUri(file), "image/png")
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        try {
-            startActivity(intent)
-        } catch (e: ActivityNotFoundException) {
-            Toast.makeText(this, "이미지를 열 앱이 없습니다", Toast.LENGTH_SHORT).show()
-        }
+    /** 사진 보기 화면을 이 사진부터 연다(옆으로 넘기며 세션 사진을 모두 본다). */
+    private fun open(file: StoredFile) {
+        startActivity(ImageViewerActivity.intent(this, sessionId, file.name))
     }
-
-    private fun imageUri(file: StoredFile): Uri =
-        ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), ContentUris.parseId(file.uri))
 
     private fun describe(name: String): String {
         val c = captures[name]
@@ -274,7 +261,7 @@ class SessionActivity : Activity() {
 
     /** MediaProvider 썸네일을 쓰고, 안 되면 직접 줄여 읽는다. */
     private fun loadThumb(file: StoredFile, px: Int): Bitmap? = try {
-        contentResolver.loadThumbnail(imageUri(file), Size(px * 2, px * 2), null)
+        contentResolver.loadThumbnail(ImageViewerActivity.imageUri(file), Size(px * 2, px * 2), null)
     } catch (e: Exception) {
         runCatching {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

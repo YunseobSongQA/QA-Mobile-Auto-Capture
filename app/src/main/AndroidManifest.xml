@@ -49,6 +49,10 @@
             android:name=".ui.session.SessionActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".ui.viewer.ImageViewerActivity"
+            android:exported="false" />
+
         <!-- 클래스 이름을 바꾸면 덮어쓰기 설치 후 접근성 권한이 풀린다. 고정할 것. -->
         <service
             android:name=".capture.CaptureService"
