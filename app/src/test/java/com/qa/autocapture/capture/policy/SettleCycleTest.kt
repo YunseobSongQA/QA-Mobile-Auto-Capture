@@ -116,6 +116,41 @@ class SettleCycleTest {
     }
 
     @Test
+    fun `토스트·로딩으로 미루면 그때까지 찍지 않고 비교를 처음부터 다시 한다`() {
+        val c = SettleCycle()
+        c.start(Kind.ACTION, 0)
+        val probe = c.evaluate(settle, settle, confirm, maxWait) as SettleCycle.Decision.Take
+        assertEquals(Shot.PROBE, probe.shot)
+        c.postpone(4000, probe.shot)
+        // 미루기 전에 찍던 결과는 버린다
+        assertEquals(SettleCycle.Outcome.Continue, c.onShot(probe.generation, probe.shot, thumb(errorShown), null, thumb(loaded), settle + 50, confirm))
+        assertEquals(SettleCycle.Decision.Wait(4000), c.evaluate(settle + 100, settle, confirm, maxWait))
+        val next = c.evaluate(4000, settle, confirm, maxWait) as SettleCycle.Decision.Take
+        assertEquals("기준을 버렸으니 비교부터 다시", Shot.PROBE, next.shot)
+    }
+
+    @Test
+    fun `미리 확보를 미루면 미룬 뒤에 다시 찍는다`() {
+        val c = SettleCycle()
+        c.start(Kind.ACTION, 0, preview = true)
+        val take = c.evaluate(preview, settle, confirm, maxWait) as SettleCycle.Decision.Take
+        assertEquals(Shot.PREVIEW, take.shot)
+        c.postpone(3000, take.shot)
+        assertEquals(SettleCycle.Decision.Wait(3000), c.evaluate(preview + 10, settle, confirm, maxWait))
+        assertEquals(Shot.PREVIEW, (c.evaluate(3000, settle, confirm, maxWait) as SettleCycle.Decision.Take).shot)
+    }
+
+    @Test
+    fun `토스트로 미루면 강제 촬영도 미룬다`() {
+        val c = SettleCycle()
+        c.start(Kind.ACTION, 0)
+        c.postpone(maxWait + 2000)
+        assertEquals(SettleCycle.Decision.Wait(maxWait + 2000), c.evaluate(maxWait, settle, confirm, maxWait))
+        val forced = c.evaluate(maxWait + 2000, settle, confirm, maxWait) as SettleCycle.Decision.Take
+        assertTrue(forced.forced)
+    }
+
+    @Test
     fun `촬영 중 이벤트가 오면 그 결과는 버리고 다시 조용해지길 기다린다`() {
         val c = SettleCycle()
         c.start(Kind.ACTION, 0)

@@ -43,12 +43,15 @@ class ScreenshotTaker(
 
     /**
      * 찍을 것. [generation] = SettleCycle 의 판단 번호(스크롤은 0). [step] = 스크롤하는 중의 중간 프레임(SCROLL).
-     * [recorder]·[segment]·[scrollDy] 는 찍는 순간 [Callback.onBeforeShot] 이 채운다.
+     * [recorder]·[segment]·[scrollDy]·[takenAt] 는 찍는 순간 [Callback.onBeforeShot] 이 채운다.
      */
     class Request(val purpose: Purpose, val generation: Int, val step: Boolean = false) {
         var recorder: Any? = null
         var segment = 0
         var scrollDy: Int? = null
+
+        /** 찍은 시각(SystemClock.uptimeMillis). */
+        var takenAt = 0L
     }
 
     interface Callback {

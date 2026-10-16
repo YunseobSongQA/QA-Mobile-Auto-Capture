@@ -50,7 +50,9 @@ class CaptureService : AccessibilityService() {
         tracker = ScreenTracker(this)
         val button = FloatingButton(this, onTap = ::toggleSession, onLongPress = ::openApp)
         overlay = button
-        controller = CaptureController(handler, button, this, options) { tag, message -> debugLog?.note(tag, controller?.current, message) }
+        controller = CaptureController(handler, button, this, options, tracker::hasLoadingIndicator) { tag, message ->
+            debugLog?.note(tag, controller?.current, message)
+        }
         CaptureStatus.connected = true
         applyEnabled(options.captureEnabled)
         val (top, bottom) = button.systemBarInsets()

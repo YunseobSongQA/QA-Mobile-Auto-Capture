@@ -22,32 +22,24 @@ object Stitcher {
     /** 행 해시만 담은 프레임. */
     class Frame(val width: Int, val height: Int, val rows: LongArray)
 
-    /** 프레임 [frame] 의 행 [top, bottom) 구간. [frame] 이 [GAP] 이면 구분선. */
+    /** 프레임 [frame] 의 행 [top, bottom) 구간. */
     data class Slice(val frame: Int, val top: Int, val bottom: Int) {
         val height get() = bottom - top
-        val isGap get() = frame == GAP
     }
-
-    /** 겹침을 못 찾은 곳에 넣는 구분선 Slice 의 frame 값. */
-    const val GAP = -1
 
     /** 결과 이미지 1장 = slices 를 위에서부터 이어붙인 것. */
     class Part(val width: Int, val frameHeight: Int, val slices: List<Slice>) {
         val height: Int = slices.sumOf { it.height }
 
-        /** 이 장에 쓰인 프레임 수(구분선 제외). */
-        val frameCount: Int get() = slices.filterNot { it.isGap }.map { it.frame }.distinct().size
-
-        /** 겹침을 못 찾아 구분선을 넣은 곳 수. */
-        val gaps: Int get() = slices.count { it.isGap }
+        /** 이 장에 이어붙인 프레임 수. */
+        val frameCount: Int get() = slices.map { it.frame }.distinct().size
     }
 
     class Plan(val parts: List<Part>, val usedFrames: Int) {
-        /** 결과 요약: 여러 장으로 나뉨 / 구분선을 넣어 이음 / 프레임 1장만 사용 / 정상 합성 */
+        /** 결과 요약: 여러 장으로 나뉨 / 프레임 1장만 사용 / 정상 합성 */
         val result: String
             get() = when {
                 parts.size > 1 -> "split"
-                parts.any { it.gaps > 0 } -> "gap"
                 usedFrames <= 1 -> "single"
                 else -> "ok"
             }
@@ -147,17 +139,16 @@ object Stitcher {
     }
 
     /**
-     * 프레임 목록(촬영 순서)으로 합성 계획을 만든다.
+     * 프레임 목록(촬영 순서)으로 합성 계획을 만든다. **겹치는 프레임끼리만** 한 장으로 합친다.
      *
-     * 1) 이어지는 프레임끼리 위치를 정해 "묶음(run)"을 만든다. 같은 위치 프레임은 버린다.
-     *    프레임 1장만 어긋났으면(오버스크롤로 늘어난 순간 등) 그 프레임만 버리고 다음 프레임으로 잇는다.
-     * 2) 겹침을 끝내 못 찾은 곳은 구분선(GAP)을 넣어 같은 장에 잇는다(화면 하나 = 이미지 한 장).
-     *    크기가 바뀐 곳(회전)과 [maxHeight] 를 넘는 곳에서만 다음 장(part)으로 나눈다.
+     * - 같은 위치 프레임은 버린다.
+     * - 프레임 1장만 어긋났으면(오버스크롤로 늘어난 순간 등) 그 프레임만 버리고 다음 프레임으로 잇는다.
+     * - 겹침을 못 찾은 곳, 크기가 바뀐 곳(회전), [maxHeight] 를 넘는 곳에서는 다음 장(part)으로 나눈다.
      *
      * @param topInset 상태바 높이. 상단 고정 영역의 최소값으로 쓴다.
      * @param bottomInset 내비게이션바 높이. 하단 고정 영역의 최소값으로 쓴다.
      * @param hints hints[i] = 프레임 i-1 → i 사이 scrollDeltaY 합(아래로 스크롤이면 +). 모르면 null. hints[0] 은 쓰지 않는다.
-     * @param maxHeight 결과 1장의 최대 높이. 넘으면 다음 part 로 나눈다.
+     * @param maxHeight 결과 1장의 최대 높이. 넘으면 프레임 경계에서 다음 part 로 나눈다.
      */
     fun plan(
         frames: List<Frame>,
@@ -168,9 +159,8 @@ object Stitcher {
     ): Plan {
         require(frames.isNotEmpty()) { "프레임이 없습니다" }
 
-        // (1) 묶음 만들기
-        val runs = mutableListOf<Run>()
-        var run = Run(newPart = true).apply { placed += Placed(0, 0) }
+        val groups = mutableListOf<List<Placed>>()
+        var group = mutableListOf(Placed(0, 0))
         var last = 0
         var lastPos = 0
         // 직전 채택 프레임부터의 이동량. 버린 프레임의 이동량도 더한다. 하나라도 모르면 null.
@@ -194,20 +184,20 @@ object Stitcher {
                         i++ // 이 프레임만 어긋났다: 버리고(이동량은 이어서 센다) 다음 프레임을 직전 프레임에 잇는다
                         continue
                     }
-                    runs += run
-                    run = Run(newPart = !sameSize(a, b)).apply { placed += Placed(i, 0) }
+                    groups += group
+                    group = mutableListOf(Placed(i, 0))
                     lastPos = 0
                 }
                 is Match.Offset -> {
                     val pos = lastPos + m.dy
-                    val top = minOf(run.placed.minOf { it.pos }, pos)
-                    val bottom = maxOf(run.placed.maxOf { it.pos }, pos) + b.height
+                    val top = minOf(group.minOf { it.pos }, pos)
+                    val bottom = maxOf(group.maxOf { it.pos }, pos) + b.height
                     if (bottom - top > maxHeight) {
-                        runs += run
-                        run = Run(newPart = true).apply { placed += Placed(i, 0) }
+                        groups += group
+                        group = mutableListOf(Placed(i, 0))
                         lastPos = 0
                     } else {
-                        run.placed += Placed(i, pos)
+                        group += Placed(i, pos)
                         lastPos = pos
                     }
                 }
@@ -216,77 +206,57 @@ object Stitcher {
             expected = 0
             i++
         }
-        runs += run
+        groups += group
 
-        // (2) 묶음을 장(part)으로: 크기가 바뀌거나 높이 제한을 넘을 때만 나눈다
-        val parts = mutableListOf<MutableList<Run>>()
-        var height = 0
-        for (r in runs) {
-            val h = r.placed.maxOf { it.pos } - r.placed.minOf { it.pos } + frames[r.placed[0].frame].height
-            if (r.newPart || parts.isEmpty() || height + CaptureConfig.STITCH_GAP_HEIGHT + h > maxHeight) {
-                parts += mutableListOf(r)
-                height = h
-            } else {
-                parts.last() += r
-                height += CaptureConfig.STITCH_GAP_HEIGHT + h
-            }
-        }
-        return Plan(parts.map { compose(frames, it, topInset, bottomInset) }, runs.sumOf { it.placed.size })
+        val parts = groups.map { compose(frames, it, topInset, bottomInset) }
+        return Plan(parts, groups.sumOf { it.size })
     }
 
     private fun add(a: Int?, b: Int?): Int? = if (a != null && b != null) a + b else null
 
     private fun sameSize(a: Frame, b: Frame) = a.width == b.width && a.height == b.height
 
-    /** 겹침으로 이어지는 프레임 묶음. [newPart] = 앞 묶음과 다른 장에 넣어야 함(크기 바뀜·높이 제한). */
-    private class Run(val newPart: Boolean) {
-        val placed = mutableListOf<Placed>()
-    }
-
-    /**
-     * 같은 장에 들어갈 묶음들을 행 단위로 합성한다.
-     * 맨 위 프레임의 상단 고정 영역 + 묶음마다 스크롤 영역(사이에 구분선) + 맨 아래 프레임의 하단 고정 영역.
-     */
-    private fun compose(frames: List<Frame>, runs: List<Run>, topInset: Int, bottomInset: Int): Part {
-        val first = frames[runs[0].placed[0].frame]
+    /** 위치가 정해진 프레임 묶음 하나를 행 단위로 합성한다. */
+    private fun compose(frames: List<Frame>, group: List<Placed>, topInset: Int, bottomInset: Int): Part {
+        val first = frames[group[0].frame]
         val w = first.width
         val h = first.height
-        val all = runs.flatMap { r -> r.placed.map { frames[it.frame].rows } }
-        if (all.size == 1) return Part(w, h, listOf(Slice(runs[0].placed[0].frame, 0, h)))
+        if (group.size == 1) return Part(w, h, listOf(Slice(group[0].frame, 0, h)))
 
-        // (1) 고정 영역(헤더·탭바): 결과에는 맨 위·맨 아래에 한 번씩만 넣고 나머지 프레임에서는 잘라낸다.
-        //     구분선 양쪽 묶음도 헤더·탭바는 같으므로 장 전체 프레임으로 잰다.
-        val (fixedTop, fixedBottom) = fixedArea(all, topInset, bottomInset)
+        val rows = group.map { frames[it.frame].rows }
+
+        // (1) 고정 영역(헤더·탭바): 결과에는 맨 위·맨 아래에 한 번씩만 넣고 나머지 프레임에서는 잘라낸다
+        val (fixedTop, fixedBottom) = fixedArea(rows, topInset, bottomInset)
+
+        // (2) 행 분류: 이웃 프레임과 비교
+        val cls = Array(group.size) { k ->
+            ByteArray(h) { y -> classify(rows, group, k, y, h) }
+        }
+
+        // (3) 맨 위 프레임의 상단 고정 영역 + 행마다 출처를 고른 스트립 + 맨 아래 프레임의 하단 고정 영역
+        val topPos = group.minOf { it.pos }
+        val bottomPos = group.maxOf { it.pos }
+        val topK = group.indexOfFirst { it.pos == topPos }
+        val bottomK = group.indexOfLast { it.pos == bottomPos }
 
         val out = SliceBuilder()
-        for ((ri, r) in runs.withIndex()) {
-            val group = r.placed
-            val topPos = group.minOf { it.pos }
-            val bottomPos = group.maxOf { it.pos }
-            val topK = group.indexOfFirst { it.pos == topPos }
-            val bottomK = group.indexOfLast { it.pos == bottomPos }
-            if (ri == 0) out.add(group[topK].frame, 0, fixedTop) else out.gap()
-
-            // (2) 행 분류: 이웃 프레임과 비교  (3) 행마다 가장 믿을 만한 프레임을 고른다
-            val rows = group.map { frames[it.frame].rows }
-            val cls = Array(group.size) { k -> ByteArray(h) { y -> classify(rows, group, k, y, h) } }
-            for (s in topPos + fixedTop until bottomPos + h - fixedBottom) {
-                var bestK = -1
-                var bestScore = Int.MAX_VALUE
-                for (k in group.indices) {
-                    val y = s - group[k].pos
-                    if (y < 0 || y >= h) continue
-                    val outsideZone = if (y >= fixedTop && y < h - fixedBottom) 0 else 1
-                    val score = outsideZone * 4 + cls[k][y]
-                    if (score < bestScore) {
-                        bestScore = score
-                        bestK = k
-                    }
+        out.add(group[topK].frame, 0, fixedTop)
+        for (s in topPos + fixedTop until bottomPos + h - fixedBottom) {
+            var bestK = -1
+            var bestScore = Int.MAX_VALUE
+            for (k in group.indices) {
+                val y = s - group[k].pos
+                if (y < 0 || y >= h) continue
+                val outsideZone = if (y >= fixedTop && y < h - fixedBottom) 0 else 1
+                val score = outsideZone * 4 + cls[k][y]
+                if (score < bestScore) {
+                    bestScore = score
+                    bestK = k
                 }
-                out.add(group[bestK].frame, s - group[bestK].pos, s - group[bestK].pos + 1)
             }
-            if (ri == runs.lastIndex) out.add(group[bottomK].frame, h - fixedBottom, h)
+            out.add(group[bestK].frame, s - group[bestK].pos, s - group[bestK].pos + 1)
         }
+        out.add(group[bottomK].frame, h - fixedBottom, h)
         return Part(w, h, out.slices)
     }
 
@@ -339,11 +309,6 @@ object Stitcher {
         private var frame = -1
         private var top = 0
         private var bottom = 0
-
-        fun gap() {
-            slices += Slice(GAP, 0, CaptureConfig.STITCH_GAP_HEIGHT)
-            frame = GAP
-        }
 
         fun add(f: Int, from: Int, to: Int) {
             if (to <= from) return

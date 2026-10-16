@@ -19,7 +19,7 @@ import com.qa.autocapture.storage.Options
  *
  * - 찍는 때(중요한 때만): 화면 진입, 터치·길게 누르기·입력, 스크롤 멈춤.
  *   앱이 스스로 바뀐 것(배너, 시계, 애니메이션)은 화면 대부분이 바뀌었을 때만.
- * - 찍는 화면: 정적으로 완성된 화면(SettleCycle).
+ * - 찍는 화면: 정적으로 완성된 화면(SettleCycle). 토스트가 떠 있거나 로딩 표시가 돌면 미룬다(깔끔한 화면만).
  * - 스크롤: 스크롤하는 동안 플로팅 버튼을 숨겨 두고, 일정 거리마다·멈출 때마다 1장(ScrollTimer)을 같은 상태에 덧붙인다
  *   → 화면 상태가 끝나면 한 장으로 이어붙는다.
  * - 화면 상태: 작은 변화는 그 상태 이미지를 최신 화면으로 바꾸고, 뚜렷이 바뀌면 새 이미지([deliver]).
@@ -30,6 +30,8 @@ class CaptureController(
     private val overlay: FloatingButton,
     service: AccessibilityService,
     private val options: Options,
+    /** 앞 화면에 돌아가는 로딩 표시가 있는가(ScreenTracker.hasLoadingIndicator). */
+    private val isLoading: () -> Boolean,
     private val debug: (tag: String, message: String) -> Unit,
 ) : ScreenshotTaker.Callback {
 
@@ -53,6 +55,10 @@ class CaptureController(
     /** 마지막으로 확보한 화면 이후 세로 스크롤 이동량(scrollDeltaY 합). 0 이 아닌 값이 없으면 모르는 것으로 본다. */
     private var scrollDy = 0
     private var scrollDyKnown = false
+
+    /** 마지막 토스트가 뜬 시각과, 화면에서 사라졌다고 볼 시각(uptime). */
+    private var toastShownAt = 0L
+    private var toastUntil = 0L
 
     private var cycleCheckPending = false
     private var scrollCheckPending = false
@@ -150,11 +156,20 @@ class CaptureController(
         checkScroll() // 이동량이 쌓였으면 바로 중간 프레임
     }
 
+    /** 토스트: 문구는 기록하고, 떠 있는 동안(TOAST_VISIBLE_MS)은 찍지 않는다. */
     fun onToast(pkg: String, text: String) {
         val rec = recorder ?: return
         rec.logToast(System.currentTimeMillis(), pkg, text, current?.className)
+        val now = SystemClock.uptimeMillis()
+        toastShownAt = now
+        toastUntil = now + CaptureConfig.TOAST_VISIBLE_MS
+        if (cycle.active) cycle.postpone(toastUntil)
         onContentChanged()
     }
+
+    /** [at] 에 찍은 화면에 토스트가 들어 있을 수 있는가. */
+    private fun toastVisibleAt(at: Long) =
+        toastShownAt != 0L && at >= toastShownAt - CaptureConfig.TOAST_EVENT_SLACK_MS && at < toastUntil
 
     /** 사용자가 홈·이 앱으로 떠났다. 기다리던 촬영을 모두 버린다(떠난 뒤 화면이 찍히지 않게). */
     fun cancelPending() {
@@ -198,6 +213,19 @@ class CaptureController(
                 handler.postAtTime(cycleCheck, d.at)
             }
             is SettleCycle.Decision.Take -> {
+                // 깔끔한 화면만: 토스트가 떠 있으면 사라질 때까지, 로딩 표시가 돌면 멈출 때까지 미룬다.
+                // 끝내 로딩이 안 끝나면(MAX_WAIT 강제 촬영) 그 화면도 증적으로 남긴다.
+                val blockedUntil = when {
+                    now < toastUntil -> toastUntil
+                    d.shot != SettleCycle.Shot.PROBE && !d.forced && isLoading() -> now + CaptureConfig.LOADING_RECHECK_MS
+                    else -> 0L
+                }
+                if (blockedUntil > 0L) {
+                    debug("#WAIT", if (now < toastUntil) "toast" else "loading")
+                    cycle.postpone(blockedUntil, d.shot)
+                    checkCycle()
+                    return
+                }
                 val purpose = when (d.shot) {
                     SettleCycle.Shot.PREVIEW -> Purpose.PREVIEW
                     SettleCycle.Shot.PROBE -> Purpose.PROBE
@@ -256,6 +284,7 @@ class CaptureController(
         }
         request.recorder = rec
         request.segment = rec.currentSegment
+        request.takenAt = SystemClock.uptimeMillis()
         if (request.purpose == Purpose.SCROLL) {
             request.scrollDy = if (scrollDyKnown) scrollDy else null
             scrollDy = 0
@@ -309,6 +338,14 @@ class CaptureController(
             Purpose.PREVIEW -> SettleCycle.Shot.PREVIEW
             Purpose.PROBE -> SettleCycle.Shot.PROBE
             else -> SettleCycle.Shot.FINAL
+        }
+        if (toastVisibleAt(request.takenAt)) {
+            // 찍는 순간 토스트가 떠 있었다: 버리고 토스트가 사라진 뒤 다시 확인한다
+            bitmap?.recycle()
+            debug("#DROP", "toast ${request.purpose.name.lowercase()}")
+            cycle.postpone(toastUntil, shot)
+            checkCycle()
+            return
         }
         when (val o = cycle.onShot(request.generation, shot, thumb, mask, lastThumb, now, CaptureConfig.CONFIRM_MS)) {
             SettleCycle.Outcome.Preview -> {

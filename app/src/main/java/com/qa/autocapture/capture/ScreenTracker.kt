@@ -3,7 +3,9 @@ package com.qa.autocapture.capture
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.InputMethodManager
+import com.qa.autocapture.capture.policy.CaptureConfig
 
 /** 화면 식별자 = 앱 패키지 + 화면 클래스. */
 data class Screen(val packageName: String, val className: String)
@@ -14,6 +16,7 @@ data class Screen(val packageName: String, val className: String)
  * - 무시: 이 앱, 홈 런처, 시스템 UI, 키보드(IME), 삼성 엣지 패널·스크린샷 툴바
  * - 떠남: 이 앱·런처가 앞으로 나오면 사용자가 테스트 화면을 떠난 것
  * - 창 ID → 화면: 같은 창에서 온 다른 className(Drawer, DecorView 등)은 같은 화면으로 본다
+ * - 로딩 표시: 앞에 있는 창에 돌아가는 ProgressBar 가 보이는지
  */
 class ScreenTracker(private val service: AccessibilityService) {
 
@@ -61,6 +64,37 @@ class ScreenTracker(private val service: AccessibilityService) {
         return windowScreens[windowId]?.takeIf { it.packageName == pkg } ?: lastSeen?.takeIf { it.packageName == pkg }
     }
 
+    /**
+     * 앞에 있는 창에 돌아가는 로딩 표시가 보이는가: 화면에 보이는 진행 정도 없는(indeterminate) ProgressBar.
+     * 진행률이 있는 막대(다운로드 %)와 SeekBar 는 로딩으로 보지 않는다. Compose 의 로딩 표시도 같은 이름으로 보인다.
+     */
+    fun hasLoadingIndicator(): Boolean {
+        val root = service.rootInActiveWindow ?: return false
+        if (root.packageName?.toString()?.let { isIgnored(it) } == true) {
+            @Suppress("DEPRECATION")
+            root.recycle()
+            return false
+        }
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue += root
+        var visited = 0
+        var found = false
+        while (queue.isNotEmpty()) {
+            val node = queue.removeFirst()
+            if (!found && visited < CaptureConfig.LOADING_SCAN_MAX_NODES) {
+                visited++
+                if (node.className?.toString() == PROGRESS_BAR && node.rangeInfo == null && node.isVisibleToUser) {
+                    found = true
+                } else {
+                    for (i in 0 until node.childCount) node.getChild(i)?.let { queue += it }
+                }
+            }
+            @Suppress("DEPRECATION")
+            node.recycle()
+        }
+        return found
+    }
+
     /** 무시 목록을 다시 만든다(런처·키보드는 사용자가 바꿀 수 있으므로 켤 때와 기록 시작 때). */
     fun refreshIgnoredPackages() {
         leavePackages.clear()
@@ -81,6 +115,7 @@ class ScreenTracker(private val service: AccessibilityService) {
 
     private companion object {
         const val MAX_WINDOWS = 256
+        const val PROGRESS_BAR = "android.widget.ProgressBar"
         const val SAMSUNG_LAUNCHER = "com.sec.android.app.launcher"
         val SYSTEM_PACKAGES = setOf(
             "com.android.systemui",

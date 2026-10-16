@@ -15,7 +15,7 @@ internal class SavedImage(val name: String, val frames: Int)
  * 화면 상태 1개의 임시 프레임 → 결과 이미지. stitch 스레드에서 부른다.
  *
  * 프레임이 1장이면 임시 PNG 를 그대로 복사하고, 여러 장이면 겹치는 부분으로 이어붙인 긴 이미지 1장을 쓴다.
- * 겹침을 끝내 못 찾은 곳은 구분선을 넣어 같은 장에 잇고, 크기가 바뀌거나 MAX_STITCH_HEIGHT 를 넘을 때만 다음 장으로 나눈다(Stitcher.plan).
+ * 겹치는 프레임끼리만 합치고, 겹침을 못 찾은 곳·크기가 바뀐 곳·MAX_STITCH_HEIGHT 를 넘는 곳에서는 다음 장으로 나눈다(Stitcher.plan).
  */
 internal object GroupSaver {
 

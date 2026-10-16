@@ -43,6 +43,20 @@ object CaptureConfig {
     /** 앱이 스스로 바뀐 것을 확인해 보고 찍을 게 없었으면 이만큼은 다시 확인하지 않는다. */
     const val CHANGE_COOLDOWN_MS = 3000L
 
+    // ── 걸러 낼 화면(토스트·로딩) ────────────────────────────────
+
+    /** 토스트가 뜬 뒤 이만큼은 화면에 남아 있다고 보고 찍지 않는다(LENGTH_LONG 3.5초 + 사라지는 시간). */
+    const val TOAST_VISIBLE_MS = 4000L
+
+    /** 이 시각보다 조금 전에 뜬 토스트도 그 순간 찍은 화면에 들어 있을 수 있다(이벤트 지연). */
+    const val TOAST_EVENT_SLACK_MS = 300L
+
+    /** 화면에 돌아가는 로딩 표시(ProgressBar)가 있으면 이 간격으로 다시 확인한다. */
+    const val LOADING_RECHECK_MS = 500L
+
+    /** 로딩 표시를 찾을 때 훑는 화면 요소 수 상한(메인 스레드 보호). */
+    const val LOADING_SCAN_MAX_NODES = 400
+
     /** takeScreenshot 최소 간격(시스템 제한 333ms + 여유). */
     const val MIN_SHOT_INTERVAL_MS = 350L
 
@@ -112,7 +126,4 @@ object CaptureConfig {
 
     /** 겹침을 못 찾았어도 바뀐 행이 이 비율 이하이면 같은 위치(시계·커서 변화)로 보고 버린다. */
     const val STITCH_SAME_MAX_CHANGED_RATIO = 0.15
-
-    /** 겹침을 끝내 못 찾은 곳(너무 빠른 스크롤)은 파일을 나누지 않고 이 높이(px)의 구분선을 넣어 한 장으로 잇는다. */
-    const val STITCH_GAP_HEIGHT = 48
 }

@@ -11,6 +11,7 @@ package com.qa.autocapture.capture.policy
  * 4) 터치·진입(ACTION)은 시작 후 maxWaitMs 가 지나면 FINAL 을 찍어 그대로 확정한다. 다른 종류는 그냥 끝낸다.
  * 1) 의 기다리는 동안 이벤트가 오면 비교를 처음부터 다시 한다. 그 뒤의 이벤트는 화면 비교 결과에 맡긴다.
  * 화면 진입이면 조용해진 지 previewMs 뒤(늦어도 ENTRY_PREVIEW_MAX_MS) 미리 1장(PREVIEW)을 확보한다.
+ * 찍으면 안 되는 화면(토스트가 떠 있음, 로딩 표시가 돎)이면 서비스가 [postpone] 으로 미룬다.
  */
 class SettleCycle {
 
@@ -42,8 +43,8 @@ class SettleCycle {
 
         data class Wait(val at: Long) : Decision
 
-        /** [shot] 을 찍어 [onShot] 에 [generation] 과 함께 돌려준다. */
-        data class Take(val shot: Shot, val generation: Int) : Decision
+        /** [shot] 을 찍어 [onShot] 에 [generation] 과 함께 돌려준다. [forced] = MAX_WAIT 에 그대로 찍는 것. */
+        data class Take(val shot: Shot, val generation: Int, val forced: Boolean = false) : Decision
     }
 
     sealed interface Outcome {
@@ -73,6 +74,9 @@ class SettleCycle {
     /** 이 시각까지는 이벤트를 "아직 바뀌는 중"으로 보고 기다린다. 이후는 화면 비교만으로 판단한다. */
     private var quietDeadline = 0L
     private var nextAt = 0L
+
+    /** [postpone] 으로 미룬 시각. 이때까지는 아무것도 찍지 않는다. */
+    private var blockedUntil = 0L
     private var waiting = false
     private var previewWanted = false
     private var forcedShot = false
@@ -89,6 +93,7 @@ class SettleCycle {
             quietDeadline = now + CaptureConfig.SETTLE_MS + CaptureConfig.QUIET_WAIT_EXTRA_MS
             waiting = false
             nextAt = 0
+            blockedUntil = 0
             previewWanted = preview
             generation++
             clearRef()
@@ -117,6 +122,7 @@ class SettleCycle {
     fun evaluate(now: Long, settleMs: Long, confirmMs: Long, maxWaitMs: Long, previewMs: Long = CaptureConfig.ENTRY_PREVIEW_MS): Decision {
         val k = kind ?: return Decision.Idle
         if (waiting) return Decision.Idle
+        if (now < blockedUntil) return Decision.Wait(blockedUntil) // 토스트·로딩으로 미룬 시각(강제 촬영도 미룸)
         // 강제로 찍을 시각을 넘기지 않는다(그 뒤의 이벤트가 강제 촬영 결과를 버리지 않게)
         quietDeadline = startedAt + minOf(settleMs + CaptureConfig.QUIET_WAIT_EXTRA_MS, maxWaitMs)
         val forceAt = startedAt + maxWaitMs
@@ -143,7 +149,20 @@ class SettleCycle {
     private fun take(shot: Shot, forced: Boolean): Decision {
         waiting = true
         forcedShot = forced
-        return Decision.Take(shot, generation)
+        return Decision.Take(shot, generation, forced)
+    }
+
+    /**
+     * 지금은 찍으면 안 되는 화면이다(토스트가 떠 있음, 로딩 표시가 돎). [until] 까지 미루고 비교를 처음부터 다시 한다.
+     * [shot] 이 미리 확보(PREVIEW)였으면 그것도 미룬 뒤에 다시 찍는다.
+     */
+    fun postpone(until: Long, shot: Shot? = null) {
+        if (kind == null) return
+        generation++
+        waiting = false
+        if (until > blockedUntil) blockedUntil = until
+        if (shot == Shot.PREVIEW) previewWanted = true
+        clearRef()
     }
 
     private fun clearRef() {
