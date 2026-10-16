@@ -16,9 +16,11 @@ import com.qa.autocapture.ui.common.Ui.ButtonStyle
 import com.qa.autocapture.ui.common.Ui.Type
 
 /**
- * 메인 화면 2) 설정 안내 카드: ① 제한된 설정 허용 → ② 접근성 서비스 켜기 → ③ 배터리 제한 없음.
+ * 메인 화면 2) 설정 안내 카드:
+ * ① 접근성 → 설치된 앱 → 앱 한 번 누르기("제한된 설정" 안내 → 확인) → ② 앱 정보 ⋮ → 제한된 설정 허용
+ * → ③ 접근성 서비스 켜기 → ④ 배터리 제한 없음.
  * 단계마다 구체적인 메뉴 경로와 해당 설정 화면으로 바로 가는 버튼이 있다.
- * ①②는 접근성 서비스가 켜지면 완료(제한된 설정을 직접 확인하는 공개 API 가 없음), ③은 배터리 최적화 제외 여부로 판단한다.
+ * ①~③은 접근성 서비스가 켜지면 완료(제한된 설정을 직접 확인하는 공개 API 가 없음), ④는 배터리 최적화 제외 여부로 판단한다.
  * 미완료면 펼치고 모두 완료면 접는다(제목 줄을 눌러 직접 바꿀 수 있음).
  */
 class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
@@ -30,6 +32,7 @@ class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
     private val body: LinearLayout
     private val progress: TextView
     private val chevron: View
+    private val notListed: TextView
     private val steps = ArrayList<Step>()
     private var expanded = true
 
@@ -54,6 +57,12 @@ class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
             ui.text("앱을 업데이트하면 이 과정을 다시 해야 합니다.", Type.LABEL_LARGE, R.color.primary),
             LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(8) },
         )
+        // 접근성 → 설치된 앱 목록에 이 앱이 안 보일 때만 나오는 경고
+        notListed = ui.text(NOT_LISTED_HELP, Type.BODY_SMALL, R.color.status_off).apply {
+            setPadding(0, ui.dp(8), 0, 0)
+            visibility = View.GONE
+        }
+        card.addView(notListed)
         body = ui.column()
         card.addView(body)
         view = card
@@ -66,24 +75,30 @@ class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
         val serviceOn = { CaptureStatus.isServiceEnabled(activity) }
         addStep(
             1,
-            "제한된 설정 허용 (가장 먼저)",
-            "홈 화면에서 \"$app\" 아이콘을 길게 누르고 ⓘ(앱 정보)를 누릅니다. 또는 설정 → 애플리케이션 → $app 으로 들어갑니다. " +
-                "오른쪽 위 ⋮(점 세 개) → \"제한된 설정 허용\" → PIN(또는 지문)을 입력합니다. 아래 [앱 정보 열기]로 바로 갈 수 있습니다.\n" +
-                "⋮ 에 \"제한된 설정 허용\"이 없으면: [접근성 설정 열기] → 설치된 앱 → $app 을 한 번 눌러 \"제한된 설정\" 안내를 띄우고 " +
-                "[확인]을 누른 뒤 다시 ⋮ 메뉴로 갑니다.",
-            listOf("앱 정보 열기" to appInfo, "메뉴가 없을 때: 접근성 설정 열기" to accessibility),
-            serviceOn,
-        )
-        addStep(
-            2,
-            "접근성 서비스 켜기",
-            "[접근성 설정 열기] → 설치된 앱 → $app → 스위치를 켜고 [허용]을 누릅니다. " +
-                "켜지면 1·2단계가 자동으로 완료 표시되고 화면 오른쪽에 [● 시작] 버튼이 나타납니다.",
+            "접근성에서 \"$app\" 한 번 누르기 (가장 먼저)",
+            "[접근성 설정 열기] → 설치된 앱 → \"$app\" 을 누릅니다. \"제한된 설정\" 안내 창이 뜨면 [확인]을 누릅니다. " +
+                "이걸 먼저 해야 다음 단계의 \"제한된 설정 허용\" 메뉴가 생깁니다.",
             listOf("접근성 설정 열기" to accessibility),
             serviceOn,
         )
         addStep(
+            2,
+            "제한된 설정 허용",
+            "[앱 정보 열기] → 오른쪽 위 ⋮(점 세 개) → \"제한된 설정 허용\" → PIN(또는 지문)을 입력합니다. " +
+                "앱 정보는 홈 화면에서 \"$app\" 아이콘을 길게 누르고 ⓘ 를 누르거나, 설정 → 애플리케이션 → $app 으로도 들어갈 수 있습니다.",
+            listOf("앱 정보 열기" to appInfo),
+            serviceOn,
+        )
+        addStep(
             3,
+            "접근성 서비스 켜기",
+            "[접근성 설정 열기] → 설치된 앱 → \"$app\" → 스위치를 켜고 [허용]을 누릅니다. " +
+                "켜지면 1~3단계가 자동으로 완료 표시되고 화면 오른쪽에 [● 시작] 버튼이 나타납니다.",
+            listOf("접근성 설정 열기" to accessibility),
+            serviceOn,
+        )
+        addStep(
+            4,
             "배터리 \"제한 없음\", 사용하지 않는 앱 관리 끄기",
             "[앱 정보 열기] → 배터리 → \"제한 없음\"을 고릅니다. 앱 정보로 돌아와 \"사용하지 않는 앱 관리\"를 끕니다. " +
                 "서비스가 중간에 꺼지지 않게 합니다.",
@@ -92,6 +107,7 @@ class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
     }
 
     fun refresh() {
+        notListed.visibility = if (CaptureStatus.registration(activity) == CaptureStatus.Registration.NOT_LISTED) View.VISIBLE else View.GONE
         var completed = 0
         for (step in steps) {
             val done = step.done()
@@ -126,6 +142,14 @@ class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
         row.addView(texts, LinearLayout.LayoutParams(0, Ui.WRAP, 1f).apply { marginStart = ui.dp(12) })
         body.addView(row)
         steps += Step(badgeHolder, number, done)
+    }
+
+    private companion object {
+        val NOT_LISTED_HELP =
+            "⚠ 지금 이 폰의 접근성 → 설치된 앱 목록에 이 앱이 등록되어 있지 않습니다(시스템이 목록에 올리지 않음).\n" +
+                "1) 폰을 다시 시작한 뒤 접근성 → 설치된 앱을 다시 확인하세요.\n" +
+                "2) 그래도 없으면 Play 스토어 → 프로필 → Play 프로텍트에서 이 앱이 차단되거나 권한이 회수되지 않았는지 확인하세요.\n" +
+                "3) 그래도 없으면 앱을 삭제하고 최신 APK 를 다시 설치하세요(저장한 증적 파일은 지워지지 않습니다)."
     }
 
     private fun setExpanded(value: Boolean) {

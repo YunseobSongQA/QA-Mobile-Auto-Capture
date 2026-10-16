@@ -35,9 +35,33 @@ object CaptureStatus {
     /** 시스템 설정에서 이 접근성 서비스가 켜져 있는가. */
     fun isServiceEnabled(context: Context): Boolean {
         val am = context.getSystemService(AccessibilityManager::class.java) ?: return false
-        return am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any {
-            val info = it.resolveInfo.serviceInfo
-            info.packageName == context.packageName && info.name == CaptureService::class.java.name
-        }
+        return am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK).any { isThisService(context, it) }
+    }
+
+    /** 시스템 접근성 설정에서 이 서비스가 어떤 상태인가. */
+    enum class Registration {
+        /** 켜져 있음. */
+        ENABLED,
+
+        /** 접근성 → 설치된 앱 목록에 있음(꺼짐). */
+        LISTED,
+
+        /** 앱에는 서비스가 있지만 시스템이 접근성 목록에 올리지 않음(설치된 앱 목록에 안 보임). */
+        NOT_LISTED,
+    }
+
+    /**
+     * 설정 앱의 "설치된 앱" 목록과 같은 AccessibilityManager.getInstalledAccessibilityServiceList 로 확인한다.
+     * NOT_LISTED 면 사용자는 접근성 설정에서 이 앱을 찾을 수 없다.
+     */
+    fun registration(context: Context): Registration {
+        if (isServiceEnabled(context)) return Registration.ENABLED
+        val am = context.getSystemService(AccessibilityManager::class.java) ?: return Registration.NOT_LISTED
+        return if (am.installedAccessibilityServiceList.any { isThisService(context, it) }) Registration.LISTED else Registration.NOT_LISTED
+    }
+
+    private fun isThisService(context: Context, info: AccessibilityServiceInfo): Boolean {
+        val s = info.resolveInfo.serviceInfo
+        return s.packageName == context.packageName && s.name == CaptureService::class.java.name
     }
 }

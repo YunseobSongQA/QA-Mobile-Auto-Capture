@@ -85,12 +85,13 @@ GitHub 에서 많이 참고하는 안드로이드 저장소(Now in Android, andr
 | 의존 방향 | `ui` → `capture`·`storage` / `capture` → `session` → `stitch`·`storage`. 거꾸로 부르지 않는다 |
 | 하지 않는 것 | 인터페이스·DI 프레임워크(구체 클래스 직접 호출), 레이아웃 XML(화면은 코드로), 외부 라이브러리 |
 | 파일 머리말 | 파일 맨 위 KDoc 에 "이 파일이 하는 일"을 쓰고, 긴 클래스는 `// ── 구역 ──` 주석으로 나눈다 |
-| 이름 고정 | `capture/CaptureService`(바꾸면 덮어쓰기 설치 후 접근성 권한이 풀림), `capture/CaptureTileService`(빠른 설정 타일), 런처 이름 `com.qa.autocapture.MainActivity`(Manifest activity-alias) |
+| 이름 고정 | `capture/CaptureService`(바꾸면 덮어쓰기 설치 후 접근성 권한이 풀림), `capture/CaptureTileService`(빠른 설정 타일), `MainActivity`(런처·접근성 설정의 "설정" 버튼이 여는 화면, 앱의 진입점이라 최상위 패키지) |
 
 ### 1-2. 폴더와 파일
 
 ```
 app/src/main/java/com/qa/autocapture/
+├── MainActivity.kt                 앱 진입점(메인 화면): 카드 4개(ui/main)를 쌓는다
 ├── capture/                        접근성 서비스 — 언제 무엇을 찍을지
 │   ├── CaptureService.kt               진입점: 이벤트 분배, 기록 시작·정지, 마스터 스위치
 │   ├── CaptureController.kt            찍을 때 판단: 진입·터치·스크롤·변화 → 정지 확인 → 화면 상태(새 이미지/교체/이어붙임)
@@ -127,10 +128,9 @@ app/src/main/java/com/qa/autocapture/
 │   └── FloatingButton.kt               플로팅 버튼(TYPE_ACCESSIBILITY_OVERLAY)
 └── ui/                             화면
     ├── common/Ui.kt                    공통 뷰 도우미(Material 3 색·글자·카드·버튼)
-    ├── main/                           메인 화면 = MainActivity + 카드 4개
-    │   ├── MainActivity.kt
+    ├── main/                           메인 화면의 카드 4개
     │   ├── StatusCard.kt                   상태 + 마스터 스위치
-    │   ├── SetupGuideCard.kt               설정 안내 3단계
+    │   ├── SetupGuideCard.kt               설정 안내 4단계, 접근성 목록 미등록 경고
     │   ├── SessionListCard.kt              저장된 세션 목록
     │   └── PrivacyCard.kt                  개인정보 및 권한
     ├── session/SessionActivity.kt      세션 열기: 이미지 목록, zip 공유, 세션 로그
@@ -495,11 +495,12 @@ manifest 의 `frames` = 그 이미지에 쓰인 프레임 수(2 이상이면 스
 - **메인**(위에서부터)
   1. 상태 카드: 상태 점·제목(동작 중 / 동작 중 · 기록 중 / 일시정지 / 서비스 꺼짐) + 설명 + 마스터 스위치
   2. 설정 안내 카드: 맨 위 "앱을 업데이트하면 이 과정을 다시 해야 합니다". 단계마다 번호/체크, 구체적인 메뉴 경로, 바로 가는 버튼.
-     ① **제한된 설정 허용(가장 먼저)**: 홈 화면에서 앱 아이콘 길게 누르기 → ⓘ 앱 정보(또는 설정 → 애플리케이션 → 앱) → 오른쪽 위 ⋮ → 제한된 설정 허용 → PIN.
-        [앱 정보 열기]. ⋮ 에 메뉴가 없으면 [접근성 설정 열기] → 설치된 앱 → 앱을 한 번 눌러 "제한된 설정" 안내를 띄운 뒤 다시.
-     ② **접근성 서비스 켜기**: [접근성 설정 열기] → 설치된 앱 → 앱 → 스위치 켜기 → 허용
-     ③ **배터리 "제한 없음", "사용하지 않는 앱 관리" 끄기**: [앱 정보 열기]
-     ①②는 접근성 서비스가 켜지면 자동 완료(제한된 설정을 직접 확인하는 공개 API 가 없음), ③은 `PowerManager.isIgnoringBatteryOptimizations`.
+     ① **접근성에서 앱 한 번 누르기(가장 먼저)**: [접근성 설정 열기] → 설치된 앱 → 앱 → "제한된 설정" 안내 창 → 확인.
+        Android 13+ 에서는 이걸 거쳐야 앱 정보 ⋮ 에 "제한된 설정 허용" 메뉴가 생긴다.
+     ② **제한된 설정 허용**: [앱 정보 열기](또는 아이콘 길게 누르기 → ⓘ, 설정 → 애플리케이션 → 앱) → 오른쪽 위 ⋮ → 제한된 설정 허용 → PIN
+     ③ **접근성 서비스 켜기**: [접근성 설정 열기] → 설치된 앱 → 앱 → 스위치 켜기 → 허용
+     ④ **배터리 "제한 없음", "사용하지 않는 앱 관리" 끄기**: [앱 정보 열기]
+     ①~③은 접근성 서비스가 켜지면 자동 완료(제한된 설정을 직접 확인하는 공개 API 가 없음), ④는 `PowerManager.isIgnoringBatteryOptimizations`.
      미완료(서비스 꺼짐 포함)면 펼친 상태, 모두 완료면 접힌 상태. 제목 줄을 눌러 직접 펼치고 접는다(완료 여부가 바뀔 때만 기본 상태로 돌아감).
   3. 저장된 세션: 날짜, 이미지 수·화면 수·기록 시간(또는 기록 중), [열기]
   4. 개인정보 및 권한: 읽는 정보, 저장 위치, 외부 전송 없음(네트워크 권한 없음), 사용자 권한은 접근성 1개

@@ -8,12 +8,12 @@ import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
+import com.qa.autocapture.MainActivity
 import com.qa.autocapture.capture.policy.CaptureConfig
 import com.qa.autocapture.overlay.FloatingButton
 import com.qa.autocapture.session.SessionRecorder
 import com.qa.autocapture.session.SessionRecovery
 import com.qa.autocapture.storage.Options
-import com.qa.autocapture.ui.main.MainActivity
 
 /**
  * 접근성 서비스 진입점. 이벤트를 받아 나눠 주고, 기록 세션과 마스터 스위치를 관리한다.

@@ -1,4 +1,4 @@
-package com.qa.autocapture.ui.main
+package com.qa.autocapture
 
 import android.app.Activity
 import android.content.Intent
@@ -6,19 +6,22 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.LinearLayout
-import com.qa.autocapture.R
 import com.qa.autocapture.capture.CaptureStatus
 import com.qa.autocapture.storage.Options
 import com.qa.autocapture.ui.common.Ui
 import com.qa.autocapture.ui.common.Ui.Type
+import com.qa.autocapture.ui.main.PrivacyCard
+import com.qa.autocapture.ui.main.SessionListCard
+import com.qa.autocapture.ui.main.SetupGuideCard
+import com.qa.autocapture.ui.main.StatusCard
 import com.qa.autocapture.ui.settings.SettingsActivity
 
 /**
  * 앱 메인 화면(레이아웃 XML 없이 코드로 구성). 위에서부터 카드 4개를 쌓는다.
  * 1) [StatusCard] 상태 + 마스터 스위치  2) [SetupGuideCard] 설정 안내  3) [SessionListCard] 저장된 세션  4) [PrivacyCard] 개인정보 및 권한
- * 앱바 오른쪽 톱니바퀴는 설정 화면(SettingsActivity).
+ * 카드는 ui/main/ 에 있다. 앱바 오른쪽 톱니바퀴는 설정 화면(SettingsActivity).
  *
- * 런처 아이콘은 Manifest 의 activity-alias(com.qa.autocapture.MainActivity)를 거쳐 이 화면을 연다.
+ * 런처·접근성 설정의 "설정" 버튼이 여는 화면이라 클래스 이름(com.qa.autocapture.MainActivity)을 고정한다.
  */
 class MainActivity : Activity() {
 

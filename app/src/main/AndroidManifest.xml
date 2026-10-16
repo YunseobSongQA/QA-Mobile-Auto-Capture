@@ -31,23 +31,15 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.QACapture">
 
+        <!-- 런처·접근성 설정의 "설정" 버튼(accessibility_service_config settingsActivity)이 여는 화면. 이름 고정. -->
         <activity
-            android:name=".ui.main.MainActivity"
-            android:exported="false" />
-
-        <!--
-          런처 아이콘·접근성 설정의 "설정" 버튼이 여는 이름. 홈 화면 아이콘이 업데이트 후에도 남도록
-          예전 이름(com.qa.autocapture.MainActivity)을 고정하고 실제 화면으로 넘긴다.
-        -->
-        <activity-alias
             android:name=".MainActivity"
-            android:exported="true"
-            android:targetActivity=".ui.main.MainActivity">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity-alias>
+        </activity>
 
         <activity
             android:name=".ui.settings.SettingsActivity"

@@ -8,8 +8,8 @@ import android.content.Intent
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import com.qa.autocapture.MainActivity
 import com.qa.autocapture.storage.Options
-import com.qa.autocapture.ui.main.MainActivity
 
 /**
  * 알림창 빠른 설정 타일: 캡처 마스터 스위치(일시정지/재개).
