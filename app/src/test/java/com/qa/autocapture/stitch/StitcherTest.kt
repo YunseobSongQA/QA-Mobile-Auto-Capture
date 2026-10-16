@@ -1,6 +1,6 @@
 package com.qa.autocapture.stitch
 
-import com.qa.autocapture.capture.CaptureConfig
+import com.qa.autocapture.capture.policy.CaptureConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue

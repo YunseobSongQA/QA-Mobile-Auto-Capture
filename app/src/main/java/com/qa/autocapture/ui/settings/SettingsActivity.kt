@@ -1,4 +1,4 @@
-package com.qa.autocapture.ui
+package com.qa.autocapture.ui.settings
 
 import android.app.Activity
 import android.os.Bundle
@@ -7,11 +7,12 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import com.qa.autocapture.R
-import com.qa.autocapture.capture.CaptureConfig
-import com.qa.autocapture.storage.EvidenceStore
+import com.qa.autocapture.capture.policy.CaptureConfig
 import com.qa.autocapture.storage.Options
-import com.qa.autocapture.ui.Ui.ButtonStyle
-import com.qa.autocapture.ui.Ui.Type
+import com.qa.autocapture.storage.StoragePaths
+import com.qa.autocapture.ui.common.Ui
+import com.qa.autocapture.ui.common.Ui.ButtonStyle
+import com.qa.autocapture.ui.common.Ui.Type
 import java.util.Locale
 
 /** 설정 화면: 캡처 타이밍(SETTLE_MS, MAX_WAIT_MS)과 디버그 로그. 값은 Options 에 바로 저장된다. */
@@ -84,7 +85,7 @@ class SettingsActivity : Activity() {
         texts.addView(
             ui.text(
                 "기록 중 받은 모든 접근성 이벤트(시각, 종류, 패키지, 클래스, 텍스트)와 캡처 시점을 " +
-                    "내장 저장공간/${EvidenceStore.DEBUG_PATH}{세션}.txt 로 저장합니다. " +
+                    "내장 저장공간/${StoragePaths.DEBUG_PATH}{세션}.txt 로 저장합니다. " +
                     "다음 기록 시작부터 적용되고, 켜 두면 배터리를 더 씁니다.",
                 Type.BODY_SMALL,
                 R.color.on_surface_variant,

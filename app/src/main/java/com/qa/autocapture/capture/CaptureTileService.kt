@@ -8,8 +8,8 @@ import android.content.Intent
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
-import com.qa.autocapture.MainActivity
 import com.qa.autocapture.storage.Options
+import com.qa.autocapture.ui.main.MainActivity
 
 /**
  * 알림창 빠른 설정 타일: 캡처 마스터 스위치(일시정지/재개).
@@ -25,7 +25,7 @@ class CaptureTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        if (!CaptureService.isEnabled(this)) {
+        if (!CaptureStatus.isServiceEnabled(this)) {
             openApp()
             return
         }
@@ -36,13 +36,13 @@ class CaptureTileService : TileService() {
 
     private fun update() {
         val tile = qsTile ?: return
-        val serviceOn = CaptureService.isEnabled(this)
+        val serviceOn = CaptureStatus.isServiceEnabled(this)
         val on = Options(this).captureEnabled
         tile.state = if (serviceOn && on) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.subtitle = when {
             !serviceOn -> "서비스 꺼짐"
             !on -> "일시정지"
-            CaptureService.recordingImages != null -> "기록 중"
+            CaptureStatus.recordingImages != null -> "기록 중"
             else -> "동작 중"
         }
         tile.updateTile()

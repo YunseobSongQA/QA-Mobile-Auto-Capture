@@ -1,22 +1,19 @@
-package com.qa.autocapture.capture
+package com.qa.autocapture.capture.policy
 
-import com.qa.autocapture.capture.SettleCycle.Kind
-import com.qa.autocapture.capture.SettleCycle.Shot
+import com.qa.autocapture.capture.policy.SettleCycle.Kind
+import com.qa.autocapture.capture.policy.SettleCycle.Shot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 정지 확인(SettleCycle), 스크롤 멈춤(ScrollTimer), 축소 이미지 비교(FrameDiff) 검증. */
-class CapturePolicyTest {
+/** 정적 완성 확인(SettleCycle): 화면을 시각의 함수로 두고 서비스처럼 대기 시각마다 다시 판단하는 시뮬레이터로 검증한다. */
+class SettleCycleTest {
 
     private val settle = CaptureConfig.SETTLE_MS
     private val confirm = CaptureConfig.CONFIRM_MS
     private val maxWait = CaptureConfig.MAX_WAIT_MS
     private val preview = CaptureConfig.ENTRY_PREVIEW_MS
-
-    // ── SettleCycle ──────────────────────────────────────────────
-
     @Test
     fun `정적인 화면은 미리 1장 확보 뒤 바뀐 게 없으면 더 찍지 않는다`() {
         val r = cycle(Kind.ACTION, preview = true) { loaded }
@@ -101,113 +98,6 @@ class CapturePolicyTest {
         assertEquals(SettleCycle.Decision.Wait(settle + 10 + settle), c.evaluate(settle + 30, settle, confirm, maxWait))
     }
 
-    // ── ScrollTimer ──────────────────────────────────────────────
-
-    private val scrollSettle = CaptureConfig.SCROLL_SETTLE_MS
-    private val scrollMax = CaptureConfig.SCROLL_MAX_WAIT_MS
-
-    @Test
-    fun `스크롤이 멈추면 SCROLL_SETTLE_MS 뒤 프레임 1장`() {
-        val drag = (0L..600L step 20).map { Scroll(it) }
-        assertEquals(listOf(600 + scrollSettle), runScroll(drag))
-    }
-
-    @Test
-    fun `스크롤이 멈출 때마다 1장씩`() {
-        val first = (0L..300L step 20).map { Scroll(it) }
-        val second = (2000L..2400L step 20).map { Scroll(it) }
-        assertEquals(listOf(300 + scrollSettle, 2400 + scrollSettle), runScroll(first + second))
-    }
-
-    @Test
-    fun `멈춘 뒤 내용 변경이 잠깐 있으면 그만큼 기다린다`() {
-        val events = listOf(Scroll(0), Scroll(300), Activity(500), Activity(700))
-        assertEquals(listOf(700 + scrollSettle), runScroll(events))
-    }
-
-    @Test
-    fun `멈춘 뒤 내용 변경이 계속돼도 SCROLL_MAX_WAIT_MS 를 넘기지 않는다`() {
-        val banner = (400L..10_000L step 100).map { Activity(it) }
-        assertEquals(listOf(300 + scrollMax), runScroll(listOf(Scroll(0), Scroll(300)) + banner))
-    }
-
-    @Test
-    fun `스크롤 없이 내용만 바뀌면 이어붙이기 모드가 아니다`() {
-        assertTrue(runScroll(listOf(Activity(0), Activity(500))).isEmpty())
-    }
-
-    @Test
-    fun `취소하면 프레임을 찍지 않는다`() {
-        assertTrue(runScroll(listOf(Scroll(0), Scroll(200), CancelScroll(300))).isEmpty())
-    }
-
-    // ── FrameDiff ────────────────────────────────────────────────
-
-    private val w = 1080
-    private val h = 2400
-    private val statusBar = 80
-    private val navBar = 130
-
-    @Test
-    fun `같은 화면은 same`() {
-        val a = screen()
-        assertTrue(FrameDiff.same(thumbOf(a), thumbOf(a.copyOf())))
-    }
-
-    @Test
-    fun `상태바 시계 변화는 비교 범위 밖이라 same`() {
-        val b = screen().also { fill(it, 900, 20, 120, 40, 0xFF000000.toInt()) }
-        assertTrue(FrameDiff.same(thumbOf(screen()), thumbOf(b)))
-    }
-
-    @Test
-    fun `깜빡이는 커서는 정지로 본다`() {
-        val b = screen().also { fill(it, 300, 1000, 4, 50, 0xFF000000.toInt()) }
-        assertTrue(FrameDiff.static(thumbOf(screen()), thumbOf(b)))
-    }
-
-    @Test
-    fun `돌아가는 로딩 표시는 정지가 아니지만 작은 변화다`() {
-        val b = screen().also { fill(it, 480, 1100, 120, 120, 0xFF24457A.toInt()) }
-        val a = thumbOf(screen())
-        val t = thumbOf(b)
-        assertFalse(FrameDiff.static(a, t))
-        assertTrue(FrameDiff.similar(a, t))
-    }
-
-    @Test
-    fun `오류 문구 한 줄은 작은 변화가 아니다`() {
-        val b = screen().also { fill(it, 48, 1500, 900, 48, 0xFFC62828.toInt()) }
-        assertFalse(FrameDiff.similar(thumbOf(screen()), thumbOf(b)))
-    }
-
-    @Test
-    fun `빼라고 한 영역(플로팅 버튼)의 변화는 세지 않는다`() {
-        val withButton = screen().also { fill(it, 900, 800, 150, 120, 0xFF24457A.toInt()) }
-        val box = FrameDiff.Box(900, 800, 1050, 920)
-        assertFalse(FrameDiff.static(thumbOf(screen()), thumbOf(withButton)))
-        assertTrue(FrameDiff.static(thumbOf(screen()), thumbOf(withButton), box))
-    }
-
-    @Test
-    fun `크기가 다르면 전부 바뀐 것으로 본다`() {
-        val other = FrameDiff.thumbnail(h, 0, w) { _, _, into -> into.fill(WHITE) }
-        assertEquals(1.0, FrameDiff.changeRatio(thumbOf(screen()), other), 0.0)
-    }
-
-    @Test
-    fun `칸 평균색은 칸 안 픽셀의 평균이다`() {
-        // 15px 칸의 절반을 검정으로 → 평균 약 0x88
-        val px = IntArray(w * 15) { WHITE }
-        for (y in 0 until 15) for (x in 0 until 7) px[y * w + x] = 0xFF000000.toInt()
-        val t = FrameDiff.thumbnail(w, 0, 15) { y, n, into -> px.copyInto(into, 0, y * w, (y + n) * w) }
-        assertEquals(72, t.columns)
-        assertEquals(1, t.rows)
-        val expected = 255 * 8 / 15
-        assertEquals((expected shl 16) or (expected shl 8) or expected, t.cells[0])
-        assertEquals(0xFFFFFF, t.cells[1])
-    }
-
     // ── SettleCycle 시뮬레이터 ───────────────────────────────────
 
     /** 10x10 칸 화면. 버튼은 오른쪽 위 2x2 칸. */
@@ -277,78 +167,5 @@ class CapturePolicyTest {
             }
         }
         return CycleResult(outcomes, accepted, shots)
-    }
-
-    // ── ScrollTimer 시뮬레이터 ───────────────────────────────────
-
-    private sealed interface Ev {
-        val t: Long
-    }
-
-    private data class Scroll(override val t: Long) : Ev
-
-    private data class Activity(override val t: Long) : Ev
-
-    private data class CancelScroll(override val t: Long) : Ev
-
-    /** 스크롤 시 바로 판단하고, Wait 이면 그 시각에 다시 판단한다. 프레임을 찍은 시각 목록. */
-    private fun runScroll(events: List<Ev>, until: Long = 60_000): List<Long> {
-        val timer = ScrollTimer()
-        val shots = mutableListOf<Long>()
-        var check: Long? = null
-        var i = 0
-
-        fun evaluate(now: Long) {
-            check = null
-            when (val d = timer.evaluate(now, scrollSettle, scrollMax)) {
-                is ScrollTimer.Decision.Wait -> check = d.at.also { assertTrue("재판단 시각은 미래여야 함", it > now) }
-                ScrollTimer.Decision.Capture -> shots += now
-                ScrollTimer.Decision.Idle -> Unit
-            }
-        }
-
-        val queue = events.sortedBy { it.t }
-        while (true) {
-            val next = queue.getOrNull(i)?.t ?: Long.MAX_VALUE
-            val c = check
-            if (c != null && c <= next && c <= until) {
-                evaluate(c)
-                continue
-            }
-            if (next > until) break
-            when (val e = queue[i++]) {
-                is Scroll -> {
-                    timer.onScroll(e.t)
-                    if (check == null) evaluate(e.t)
-                }
-                is Activity -> timer.onActivity(e.t)
-                is CancelScroll -> {
-                    timer.cancel()
-                    check = null
-                }
-            }
-        }
-        return shots
-    }
-
-    // ── FrameDiff 도우미 ─────────────────────────────────────────
-
-    /** 흰 바탕 + 상태바(어두운 띠) + 목록 무늬. */
-    private fun screen(): IntArray {
-        val px = IntArray(w * h) { WHITE }
-        fill(px, 0, 0, w, statusBar, 0xFF202020.toInt())
-        for (row in 0 until 20) fill(px, 48, 200 + row * 100, 600, 24, 0xFF555555.toInt())
-        return px
-    }
-
-    private fun fill(px: IntArray, x: Int, y: Int, fw: Int, fh: Int, color: Int) {
-        for (yy in y until y + fh) for (xx in x until x + fw) px[yy * w + xx] = color
-    }
-
-    private fun thumbOf(px: IntArray) =
-        FrameDiff.thumbnail(w, statusBar, h - navBar) { y, n, into -> px.copyInto(into, 0, y * w, (y + n) * w) }
-
-    private companion object {
-        const val WHITE = 0xFFFFFFFF.toInt()
     }
 }

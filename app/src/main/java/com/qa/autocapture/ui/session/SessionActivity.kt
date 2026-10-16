@@ -1,4 +1,4 @@
-package com.qa.autocapture.ui
+package com.qa.autocapture.ui.session
 
 import android.app.Activity
 import android.app.AlertDialog
@@ -31,9 +31,13 @@ import com.qa.autocapture.R
 import com.qa.autocapture.storage.CaptureRecord
 import com.qa.autocapture.storage.EvidenceStore
 import com.qa.autocapture.storage.SessionData
+import com.qa.autocapture.storage.SessionStore
+import com.qa.autocapture.storage.StoragePaths
 import com.qa.autocapture.storage.StoredFile
-import com.qa.autocapture.ui.Ui.ButtonStyle
-import com.qa.autocapture.ui.Ui.Type
+import com.qa.autocapture.storage.Times
+import com.qa.autocapture.ui.common.Ui
+import com.qa.autocapture.ui.common.Ui.ButtonStyle
+import com.qa.autocapture.ui.common.Ui.Type
 import java.util.concurrent.Executors
 
 /** 세션 1개 열기: 요약, zip 공유, 세션 로그 보기, 저장한 이미지 목록(누르면 이미지 보기). */
@@ -63,7 +67,7 @@ class SessionActivity : Activity() {
         ui = Ui(this)
         store = EvidenceStore(this)
         sessionId = intent.getStringExtra(EXTRA_SESSION) ?: return finish()
-        val s = store.loadSession(sessionId)
+        val s = SessionStore(this).load(sessionId)
         session = s
         captures = s?.screens?.flatMap { it.captures }?.associateBy { it.file } ?: emptyMap()
 
@@ -76,7 +80,7 @@ class SessionActivity : Activity() {
                 images.getOrNull(position - headerViewsCount)?.let { view(it) }
             }
         }
-        val title = s?.let { EvidenceStore.format(it.startedAt, "yyyy-MM-dd HH:mm:ss") } ?: sessionId
+        val title = s?.let { Times.format(it.startedAt, "yyyy-MM-dd HH:mm:ss") } ?: sessionId
         setContentView(ui.page(ui.appBar(title, onBack = ::finish), list))
         loadFiles()
     }
@@ -114,11 +118,11 @@ class SessionActivity : Activity() {
                 if (s.toasts.isNotEmpty()) append(" · 토스트 ").append(s.toasts.size).append("건")
                 append('\n')
                 val end = s.endedAt
-                append(EvidenceStore.format(s.startedAt, "HH:mm:ss")).append(" ~ ")
-                append(if (s.ended && end != null) EvidenceStore.format(end, "HH:mm:ss") else "기록 중")
+                append(Times.format(s.startedAt, "HH:mm:ss")).append(" ~ ")
+                append(if (s.ended && end != null) Times.format(end, "HH:mm:ss") else "기록 중")
                 append('\n')
             }
-            append("저장 위치: 내장 저장공간/").append(EvidenceStore.sessionPath(sessionId))
+            append("저장 위치: 내장 저장공간/").append(StoragePaths.sessionPath(sessionId))
         }
     }
 
@@ -128,7 +132,7 @@ class SessionActivity : Activity() {
             main.post {
                 if (isDestroyed) return@post
                 images = files.filter { it.name.endsWith(".png") }
-                logFile = files.firstOrNull { it.name == EvidenceStore.SESSION_LOG_FILE }
+                logFile = files.firstOrNull { it.name == StoragePaths.SESSION_LOG_FILE }
                 ui.setEnabled(shareButton, files.isNotEmpty())
                 ui.setEnabled(logButton, logFile != null)
                 adapter.notifyDataSetChanged()
@@ -171,7 +175,7 @@ class SessionActivity : Activity() {
                     setPadding(ui.dp(24), ui.dp(8), ui.dp(24), ui.dp(8))
                 }
                 AlertDialog.Builder(this)
-                    .setTitle(EvidenceStore.SESSION_LOG_FILE)
+                    .setTitle(StoragePaths.SESSION_LOG_FILE)
                     .setView(ScrollView(this).apply { addView(body) })
                     .setPositiveButton("닫기", null)
                     .show()
@@ -196,7 +200,7 @@ class SessionActivity : Activity() {
 
     private fun describe(name: String): String {
         val c = captures[name]
-        val time = c?.let { EvidenceStore.format(it.at, "HH:mm:ss") }
+        val time = c?.let { Times.format(it.at, "HH:mm:ss") }
         val kind = when {
             c != null && c.frames > 1 -> "스크롤 이어붙임 · 화면 ${c.frames}장"
             // 이전 버전 파일 이름

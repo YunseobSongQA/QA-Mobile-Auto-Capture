@@ -23,7 +23,7 @@
 | `MediaStore.Files` | `Download/`, `Documents/` | 제한 없음 |
 
 그래서 모든 산출물(PNG, manifest.json, session_log.txt)을 `Documents/QAEvidence/{세션시작시각}/` 한 폴더에 저장한다(A안, 확정).
-PNG도 이미지로 색인되므로 갤러리 앱에 앨범으로 보인다. 경로는 `storage/EvidenceStore.kt` 의 상수 하나로 관리한다.
+PNG도 이미지로 색인되므로 갤러리 앱에 앨범으로 보인다. 경로와 파일 이름 규칙은 `storage/StoragePaths.kt` 한 곳에서 관리한다.
 
 ### 0-2. 캡처 방식 변경 이력
 
@@ -66,66 +66,104 @@ PNG도 이미지로 색인되므로 갤러리 앱에 앨범으로 보인다. 경
 
 ---
 
-## 1. 폴더 구조
+## 1. 코드 구조
+
+### 1-1. 규칙
+
+GitHub 에서 많이 참고하는 안드로이드 저장소(Now in Android, android/architecture-samples)와 Kotlin 공식 코딩 규칙을 따른다.
+
+| 규칙 | 내용 |
+|---|---|
+| 패키지 = 기능 | `capture`(언제 찍을지) · `session`(찍은 것을 기록) · `stitch`(이어붙이기) · `storage`(파일) · `overlay`(플로팅 버튼) · `ui`(화면) |
+| 파일 1개 = 클래스 1개 | 파일 이름 = 주 클래스 이름. 그 클래스만 쓰는 작은 모델(예: `FrameStore.kt` 의 `FrameFile`)만 같은 파일에 둔다 |
+| 순수 로직 분리 | `capture/policy`, `stitch` 는 Android 를 import 하지 않는다 → JVM 단위테스트. 테스트는 같은 패키지 경로의 `{클래스}Test.kt` |
+| 한 곳에 모으기 | 캡처 상수는 `CaptureConfig`, 저장 위치·파일 이름 규칙은 `StoragePaths` |
+| 의존 방향 | `ui` → `capture`·`storage` / `capture` → `session` → `stitch`·`storage`. 거꾸로 부르지 않는다 |
+| 하지 않는 것 | 인터페이스·DI 프레임워크(구체 클래스 직접 호출), 레이아웃 XML(화면은 코드로), 외부 라이브러리 |
+| 파일 머리말 | 파일 맨 위 KDoc 에 "이 파일이 하는 일"을 쓰고, 긴 클래스는 `// ── 구역 ──` 주석으로 나눈다 |
+| 이름 고정 | `capture/CaptureService`(바꾸면 덮어쓰기 설치 후 접근성 권한이 풀림), `capture/CaptureTileService`(빠른 설정 타일), 런처 이름 `com.qa.autocapture.MainActivity`(Manifest activity-alias) |
+
+### 1-2. 폴더와 파일
 
 ```
-.
-├── DESIGN.md
-├── README.md
-├── .gitignore                      # *.jks, *.b64, *.keystore, local.properties, build/ 등
-├── .github/workflows/release.yml   # 테스트 → release APK → 네트워크 권한 확인 → GitHub Release "latest"
-├── settings.gradle.kts, build.gradle.kts, gradle.properties
-├── gradlew, gradlew.bat, gradle/wrapper/*
-└── app/
-    ├── build.gradle.kts
-    └── src/
-        ├── main/
-        │   ├── AndroidManifest.xml
-        │   ├── java/com/qa/autocapture/
-        │   │   ├── MainActivity.kt
-        │   │   ├── capture/CaptureService.kt
-        │   │   ├── capture/CapturePolicy.kt
-        │   │   ├── capture/CaptureTileService.kt
-        │   │   ├── session/SessionRecorder.kt
-        │   │   ├── stitch/Stitcher.kt
-        │   │   ├── stitch/PngWriter.kt
-        │   │   ├── storage/EvidenceStore.kt
-        │   │   ├── overlay/FloatingButton.kt
-        │   │   ├── ui/Ui.kt
-        │   │   ├── ui/SettingsActivity.kt
-        │   │   └── ui/SessionActivity.kt
-        │   └── res/
-        │       ├── mipmap-anydpi/ic_launcher.xml   # adaptive icon (배경·전경·단색)
-        │       ├── drawable/                       # 아이콘 전경·단색·타일, UI 아이콘(벡터)
-        │       ├── values/, values-night/          # 색 역할(colors), 테마(themes) — 다크모드
-        │       ├── values/strings.xml
-        │       └── xml/accessibility_service_config.xml
-        └── test/java/com/qa/autocapture/
-            ├── capture/CapturePolicyTest.kt
-            ├── stitch/StitcherTest.kt
-            └── stitch/PngWriterTest.kt
+app/src/main/java/com/qa/autocapture/
+├── capture/                        접근성 서비스 — 언제 무엇을 찍을지
+│   ├── CaptureService.kt               진입점: 이벤트 분배, 기록 시작·정지, 마스터 스위치
+│   ├── CaptureController.kt            찍을 때 판단: 진입·터치·스크롤·변화 → 정지 확인 → 화면 상태(새 이미지/교체/이어붙임)
+│   ├── ScreenshotTaker.kt              촬영 큐: 최소 간격, 버튼 숨김, takeScreenshot, 축소 이미지 계산
+│   ├── ScreenTracker.kt                화면 식별: 무시할 패키지, 창 ID → 화면(Screen)
+│   ├── CaptureStatus.kt                메인 화면·타일이 보는 서비스 상태
+│   ├── DebugLog.kt                     디버그 로그(받은 이벤트·판단 기록)
+│   ├── CaptureTileService.kt           빠른 설정 타일(일시정지/재개)
+│   └── policy/                     순수 로직 (JVM 테스트)
+│       ├── CaptureConfig.kt            캡처 상수 전부
+│       ├── SettleCycle.kt              "정적으로 완성된 화면" 판단
+│       ├── ScrollTimer.kt              "스크롤 멈춤" 판단
+│       └── FrameDiff.kt                축소 이미지 비교
+├── session/                        기록 — 찍은 화면을 세션·이미지로
+│   ├── SessionRecorder.kt              세션 1개: 화면 방문·상태별 프레임, manifest·세션 로그
+│   ├── GroupSaver.kt                   화면 상태 1개의 프레임 → 이어붙인 이미지 저장
+│   ├── SessionRecovery.kt              비정상 종료 세션 정리
+│   └── SessionThreads.kt               저장·이어붙이기 스레드
+├── stitch/                         순수 로직 (JVM 테스트) — 이어붙이기
+│   ├── Stitcher.kt                     겹침 계산, 고정 영역(헤더·탭바), 합성 계획
+│   ├── PartRenderer.kt                 합성 계획 → PNG
+│   └── PngWriter.kt                    행 단위 스트리밍 PNG 인코더
+├── storage/                        파일 — 어디에 어떻게 쓰는지
+│   ├── StoragePaths.kt                 저장 위치·파일 이름 규칙
+│   ├── EvidenceStore.kt                결과물 파일(MediaStore): 저장·목록·읽기·zip
+│   ├── SessionStore.kt                 session.json·manifest.json 읽기·쓰기
+│   ├── SessionData.kt                  기록 모델(세션·화면·이미지·토스트)
+│   ├── FrameStore.kt                   임시 프레임 폴더
+│   ├── FrameReader.kt                  임시 프레임 PNG → 픽셀
+│   ├── TextLog.kt                      세션 로그·디버그 로그 파일
+│   ├── Options.kt                      설정값(마스터 스위치, 타이밍, 디버그 로그)
+│   └── Times.kt                        시각 형식
+├── overlay/
+│   └── FloatingButton.kt               플로팅 버튼(TYPE_ACCESSIBILITY_OVERLAY)
+└── ui/                             화면
+    ├── common/Ui.kt                    공통 뷰 도우미(Material 3 색·글자·카드·버튼)
+    ├── main/                           메인 화면 = MainActivity + 카드 4개
+    │   ├── MainActivity.kt
+    │   ├── StatusCard.kt                   상태 + 마스터 스위치
+    │   ├── SetupGuideCard.kt               설정 안내 3단계
+    │   ├── SessionListCard.kt              저장된 세션 목록
+    │   └── PrivacyCard.kt                  개인정보 및 권한
+    ├── session/SessionActivity.kt      세션 열기: 이미지 목록, zip 공유, 세션 로그
+    └── settings/SettingsActivity.kt    타이밍·디버그 로그 설정
+
+app/src/test/java/com/qa/autocapture/   main 과 같은 경로
+├── capture/policy/                 SettleCycleTest, ScrollTimerTest, FrameDiffTest
+└── stitch/                         StitcherTest, PngWriterTest
+
+app/src/main/res/                   mipmap-anydpi(앱 아이콘), drawable(아이콘), values·values-night(색·테마·문구), xml(접근성 서비스 설정)
+.github/workflows/release.yml       테스트 → release APK → 네트워크 권한 확인 → GitHub Release "latest"
 ```
 
-## 2. 파일 목록과 역할
+## 2. 파일이 이어지는 순서
 
-| 파일 | 계층 | 역할 |
+한 장이 저장되기까지 어떤 파일을 거치는지(메인 스레드 → 저장 스레드 → 이어붙이기 스레드).
+
+```
+CaptureService.onAccessibilityEvent
+  → ScreenTracker            어느 화면의 이벤트인가, 무시할 것인가
+  → CaptureController        찍을 때인가 (진입·터치·스크롤·큰 변화)
+      → SettleCycle / ScrollTimer   완성됐나? 스크롤이 멈췄나?
+      → ScreenshotTaker      찍기(버튼 숨김) → 축소 이미지
+      → deliver()            새 이미지 / 마지막 화면 교체 / 이어붙일 프레임 추가
+  → SessionRecorder.addFrame → FrameStore (임시 PNG)
+  → 화면 상태가 끝나면 GroupSaver → Stitcher(계획) → PartRenderer·PngWriter → EvidenceStore (Documents/QAEvidence)
+                          SessionStore (manifest.json) · TextLog (session_log.txt)
+메인 화면: MainActivity → StatusCard(CaptureStatus) · SetupGuideCard · SessionListCard(SessionStore) · PrivacyCard
+```
+
+| 계층 | 파일 | Android 의존 |
 |---|---|---|
-| `capture/CaptureService.kt` | Android | 접근성 서비스. 이벤트 수신·무시 대상 필터·화면 식별, 찍을 때 판단(진입·터치·입력·스크롤·큰 변화), 정지 확인 구동, 촬영 큐(350ms 간격, 저장용만 버튼 숨김), 별도 스레드에서 축소 이미지 계산, 화면 상태 판단(새 이미지/최신으로 바꿈/덧붙임), 세션 시작/정지, 마스터 스위치, 디버그 로그, 화면·타일용 상태 |
-| `capture/CapturePolicy.kt` | **순수 Kotlin** | `CaptureConfig`(상수 전부), `SettleCycle`(정적 완성 확인), `ScrollTimer`(스크롤 멈춤), `FrameDiff`(축소 이미지·바뀐 칸 비율·버튼 영역 제외) |
-| `capture/CaptureTileService.kt` | Android | 빠른 설정 타일. 마스터 스위치 토글, 상태 표시 |
-| `session/SessionRecorder.kt` | Android | 세션 1개. 화면 상태별 임시 프레임(NEW/REPLACE/SCROLL), 상태가 끝나면 이어붙여 이미지 저장, 화면 순번·파일 번호, manifest·세션 로그, 비정상 종료 정리·남은 프레임 복구 |
-| `stitch/Stitcher.kt` | **순수 Kotlin** | 행 해시, scrollDeltaY 힌트 검증, 오프셋 투표, 중복 제거, 분리 판단, 고정 영역 판별, 합성 계획(Plan) |
-| `stitch/PngWriter.kt` | **순수 Kotlin** | 스트리밍 PNG 인코더 + Plan 렌더링 |
-| `storage/EvidenceStore.kt` | Android | MediaStore 저장·조회(PNG, manifest.json, zip), 임시 프레임 파일, 세션 기록(session.json), `Options`(설정값), `TextLog`(세션 로그·디버그 로그) |
-| `overlay/FloatingButton.kt` | Android UI | `TYPE_ACCESSIBILITY_OVERLAY` 플로팅 버튼. 탭=시작/정지, 길게=앱 열기, 드래그, 확보 이미지 수, 저장용 촬영 때 숨김, 화면 위치(비교에서 뺄 영역) |
-| `MainActivity.kt` | Android UI | 상태 카드 + 마스터 스위치, 설정 안내(3단계, 펼침/접힘), 세션 목록, 개인정보 및 권한 |
-| `ui/Ui.kt` | Android UI | 공통 뷰 도우미: Material 3 색 역할·글자 단계·카드·버튼·스위치·앱바·여백 |
-| `ui/SettingsActivity.kt` | Android UI | SETTLE_MS, MAX_WAIT_MS 슬라이더, 디버그 로그 |
-| `ui/SessionActivity.kt` | Android UI | 세션 열기: 요약, zip 공유, 세션 로그 보기, 이미지 목록 |
-| `CapturePolicyTest.kt` | JVM 테스트 | 정적 완성 확인, 스크롤 멈춤, 축소 이미지 비교 |
-| `StitcherTest.kt`, `PngWriterTest.kt` | JVM 테스트 | 합성 이미지로 원본 복원(겹침 계산·힌트·고정 영역 판별·분리), PNG 왕복 |
-
-인터페이스·DI 없음. 계층 간 호출은 구체 클래스 직접 호출. 화면은 레이아웃 XML 없이 코드로 만든다.
+| 판단(순수) | `capture/policy/*`, `stitch/Stitcher`, `stitch/PngWriter`, `stitch/PartRenderer` | 없음 → JVM 테스트 |
+| 서비스 | `capture/*` | AccessibilityService, takeScreenshot |
+| 기록 | `session/*` | Bitmap, 스레드 |
+| 저장 | `storage/*` | MediaStore, 파일, SharedPreferences |
+| 화면 | `ui/*`, `overlay/*` | View |
 
 ## 3. 이벤트 흐름
 
@@ -429,7 +467,7 @@ manifest 의 `frames` = 그 이미지에 쓰인 프레임 수(2 이상이면 스
 
 ### 6-1. 디자인 원칙 (신뢰감 있는 사내 QA 도구)
 
-- Material 3 색 역할·글자 단계·모양을 따르되, 외부 라이브러리 금지 조건 때문에 Material Components 대신 프레임워크 뷰로 구현한다(`ui/Ui.kt`).
+- Material 3 색 역할·글자 단계·모양을 따르되, 외부 라이브러리 금지 조건 때문에 Material Components 대신 프레임워크 뷰로 구현한다(`ui/common/Ui.kt`).
 - 색: 남색 `primary`(#24457A, 다크 #AEC6FF) 1색 + 회색 톤. **상태 색만** 초록(동작 중)·회색(일시정지)·빨강(서비스 꺼짐).
 - 다크모드: `values-night` 의 같은 이름 색 역할 + 어두운 기본 테마.
 - 글자: 22sp 앱바 제목, 16sp 카드 제목/본문, 14sp 본문·버튼, 12sp 보조 설명. 여백: 화면 가장자리 16dp, 카드 안 16dp, 카드 사이 12dp.
@@ -485,7 +523,7 @@ manifest 의 `frames` = 그 이미지에 쓰인 프레임 수(2 이상이면 스
 
 ## 9. 테스트 계획 (JVM 단위 테스트)
 
-`CapturePolicyTest` — 정지 확인은 화면을 시각의 함수로 두고(버튼이 찍힌 비교용 화면 포함) 서비스처럼 대기 시각마다 다시 판단하는 시뮬레이터로 검증한다.
+`SettleCycleTest`·`ScrollTimerTest`·`FrameDiffTest` — 정지 확인은 화면을 시각의 함수로 두고(버튼이 찍힌 비교용 화면 포함) 서비스처럼 대기 시각마다 다시 판단하는 시뮬레이터로 검증한다.
 
 | 테스트 | 기대 |
 |---|---|

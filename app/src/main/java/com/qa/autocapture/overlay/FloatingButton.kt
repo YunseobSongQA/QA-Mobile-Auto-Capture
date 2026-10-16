@@ -13,8 +13,8 @@ import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.TextView
-import com.qa.autocapture.capture.CaptureConfig
-import com.qa.autocapture.capture.FrameDiff
+import com.qa.autocapture.capture.policy.CaptureConfig
+import com.qa.autocapture.capture.policy.FrameDiff
 import kotlin.math.hypot
 
 /**

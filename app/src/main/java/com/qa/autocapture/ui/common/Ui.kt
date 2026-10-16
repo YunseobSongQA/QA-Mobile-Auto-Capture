@@ -1,4 +1,4 @@
-package com.qa.autocapture.ui
+package com.qa.autocapture.ui.common
 
 import android.app.Activity
 import android.content.res.ColorStateList

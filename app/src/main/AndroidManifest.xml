@@ -32,20 +32,29 @@
         android:theme="@style/Theme.QACapture">
 
         <activity
+            android:name=".ui.main.MainActivity"
+            android:exported="false" />
+
+        <!--
+          런처 아이콘·접근성 설정의 "설정" 버튼이 여는 이름. 홈 화면 아이콘이 업데이트 후에도 남도록
+          예전 이름(com.qa.autocapture.MainActivity)을 고정하고 실제 화면으로 넘긴다.
+        -->
+        <activity-alias
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:targetActivity=".ui.main.MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
         <activity
-            android:name=".ui.SettingsActivity"
+            android:name=".ui.settings.SettingsActivity"
             android:exported="false" />
 
         <activity
-            android:name=".ui.SessionActivity"
+            android:name=".ui.session.SessionActivity"
             android:exported="false" />
 
         <!-- 클래스 이름을 바꾸면 덮어쓰기 설치 후 접근성 권한이 풀린다. 고정할 것. -->

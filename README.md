@@ -268,22 +268,26 @@ rm ~/qa-capture-release.jks ~/qa-capture-release.jks.b64
 
 versionCode는 GitHub run number로 자동 증가합니다. versionName은 `1.0.{run number}`입니다.
 
-### 폴더 구조
+### 코드 구조
+
+패키지는 기능별, 파일 1개 = 클래스 1개(파일 이름 = 클래스 이름)입니다. 파일마다 맨 위 주석에 하는 일을 적었습니다.
 
 ```
 app/src/main/java/com/qa/autocapture/
-├── MainActivity.kt                   # 메인 화면: 상태·마스터 스위치, 설정 안내(3단계), 세션 목록, 개인정보 및 권한
-├── capture/CaptureService.kt         # 접근성 서비스: 찍을 때 판단, 정지 확인, 촬영 큐, 화면 상태 판단, 일시정지, 디버그 로그
-├── capture/CapturePolicy.kt          # 순수 로직: 상수(CaptureConfig), 정적 완성 확인(SettleCycle), 스크롤 멈춤(ScrollTimer), 축소 이미지 비교(FrameDiff)
-├── capture/CaptureTileService.kt     # 빠른 설정 타일: 캡처 일시정지/재개
-├── session/SessionRecorder.kt        # 세션 기록: 화면 상태별 프레임 모으기·이어붙여 저장, manifest·세션 로그
-├── stitch/Stitcher.kt                # 순수 로직: 겹침 계산(scrollDeltaY·행 비교), 고정 영역 판별, 합성 계획
-├── stitch/PngWriter.kt               # 순수 로직: 행 단위 스트리밍 PNG 인코더
-├── storage/EvidenceStore.kt          # 저장: MediaStore, manifest, zip, 설정값(Options), 텍스트 로그(TextLog)
-├── overlay/FloatingButton.kt         # 플로팅 버튼 (TYPE_ACCESSIBILITY_OVERLAY)
-└── ui/                               # Ui.kt(Material 3 스타일 공통 뷰), SettingsActivity, SessionActivity
+├── capture/      접근성 서비스 — 언제 무엇을 찍을지
+│   │             CaptureService(진입점) · CaptureController(찍을 때 판단) · ScreenshotTaker(촬영 큐)
+│   │             ScreenTracker(화면 식별) · CaptureStatus(상태 공유) · DebugLog · CaptureTileService(빠른 설정 타일)
+│   └── policy/   순수 로직: CaptureConfig(상수 전부) · SettleCycle(완성 판단) · ScrollTimer(스크롤 멈춤) · FrameDiff(화면 비교)
+├── session/      기록: SessionRecorder(세션 1개) · GroupSaver(프레임 → 이어붙인 이미지) · SessionRecovery · SessionThreads
+├── stitch/       순수 로직: Stitcher(겹침·고정 영역·합성 계획) · PartRenderer · PngWriter
+├── storage/      파일: StoragePaths(경로·이름 규칙) · EvidenceStore(MediaStore) · SessionStore(manifest) · SessionData(모델)
+│                 FrameStore·FrameReader(임시 프레임) · TextLog(로그) · Options(설정값) · Times
+├── overlay/      FloatingButton(플로팅 버튼)
+└── ui/           common/Ui(공통 뷰) · main/(MainActivity + StatusCard·SetupGuideCard·SessionListCard·PrivacyCard)
+                  session/SessionActivity · settings/SettingsActivity
 ```
 
+파일별 역할, 의존 방향, 한 장이 저장되기까지 거치는 순서는 [DESIGN.md](DESIGN.md) 1·2장에 있습니다.
 자세한 이벤트 흐름과 스티칭 알고리즘은 [DESIGN.md](DESIGN.md)에 있습니다.
 
 ## 4. 권한과 개인정보
