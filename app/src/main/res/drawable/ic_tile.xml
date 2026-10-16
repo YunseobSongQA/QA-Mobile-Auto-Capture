@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 빠른 설정 타일 아이콘(24dp, 단색). 앱 아이콘의 단색 모양을 0.4배로 줄여 가운데에 둔다. -->
+<!-- 빠른 설정 타일 아이콘(24dp, 단색). 앱 아이콘의 QA 모양을 0.4배로 줄여 가운데에 둔다. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
@@ -8,11 +8,20 @@
     <group
         android:scaleX="0.4"
         android:scaleY="0.4"
-        android:translateX="-9.6"
-        android:translateY="-9.6">
+        android:translateX="-9.82"
+        android:translateY="-9.9">
+        <!-- Q: 고리 + 꼬리 -->
         <path
             android:fillColor="#FFFFFF"
             android:fillType="evenOdd"
-            android:pathData="M40,28H60L72,40V76A4,4 0,0 1,68 80H40A4,4 0,0 1,36 76V32A4,4 0,0 1,40 28ZM42,35H55V38H42ZM42,42H66V45H42ZM47.12,55.88L51,59.76L60.88,49.88L65.12,54.12L51,68.24L42.88,60.12Z" />
+            android:pathData="M27.9,54A12.6,12.6 0,1 1 53.1,54A12.6,12.6 0,1 1 27.9,54ZM33.6,54A6.9,6.9 0,1 1 47.4,54A6.9,6.9 0,1 1 33.6,54Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M43.22,60.68L50.62,68.08L54.58,64.12L47.18,56.72Z" />
+        <!-- A: 윤곽 + 가운데 구멍 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M66.4,41.4L72,41.4L81.2,66.6L75.3,66.6L73.26,61L65.14,61L63.1,66.6L57.2,66.6ZM69.2,49.89L71.58,56.4L66.82,56.4Z" />
     </group>
 </vector>

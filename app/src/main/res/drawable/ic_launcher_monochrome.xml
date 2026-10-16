@@ -1,12 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 단색 테마 아이콘(Android 13+): 같은 문서 모양, 글줄과 체크는 뚫린 부분(evenOdd). 시스템이 색을 입힌다. -->
+<!-- 단색 테마 아이콘: 전경과 같은 QA 모양(색은 시스템이 입힘). 108dp 캔버스, 가운데 66dp 안전 영역 안에 그린다. 도형은 기하 도형으로 직접 그린 글자(폰트 아님). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#FFFFFF"
-        android:fillType="evenOdd"
-        android:pathData="M40,28H60L72,40V76A4,4 0,0 1,68 80H40A4,4 0,0 1,36 76V32A4,4 0,0 1,40 28ZM42,35H55V38H42ZM42,42H66V45H42ZM47.12,55.88L51,59.76L60.88,49.88L65.12,54.12L51,68.24L42.88,60.12Z" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="1.08"
+        android:scaleY="1.08">
+        <!-- Q: 고리 + 꼬리 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M27.9,54A12.6,12.6 0,1 1 53.1,54A12.6,12.6 0,1 1 27.9,54ZM33.6,54A6.9,6.9 0,1 1 47.4,54A6.9,6.9 0,1 1 33.6,54Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M43.22,60.68L50.62,68.08L54.58,64.12L47.18,56.72Z" />
+        <!-- A: 윤곽 + 가운데 구멍 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:fillType="evenOdd"
+            android:pathData="M66.4,41.4L72,41.4L81.2,66.6L75.3,66.6L73.26,61L65.14,61L63.1,66.6L57.2,66.6ZM69.2,49.89L71.58,56.4L66.82,56.4Z" />
+    </group>
 </vector>
