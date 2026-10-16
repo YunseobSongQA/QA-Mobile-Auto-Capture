@@ -461,12 +461,12 @@ class Options(context: Context) {
         get() = prefs.getBoolean(KEY_CAPTURE_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_CAPTURE_ENABLED, value).apply()
 
-    /** 이 시간 동안 화면 변화가 없으면 최종 화면(_final)을 찍는다. */
+    /** 이 시간 동안 화면 이벤트가 없으면 정지 확인을 거쳐 완성된 화면을 찍는다. */
     var settleMs: Long
         get() = prefs.getLong(KEY_SETTLE_MS, CaptureConfig.SETTLE_MS).coerceIn(CaptureConfig.SETTLE_MIN_MS, CaptureConfig.SETTLE_MAX_MS)
         set(value) = prefs.edit().putLong(KEY_SETTLE_MS, value).apply()
 
-    /** 변화가 계속돼도 이 시간이 지나면 그 시점 화면을 _final 로 찍는다. */
+    /** 화면 진입·터치 뒤 계속 움직여도 이 시간이 지나면 그 시점 화면을 찍는다. */
     var maxWaitMs: Long
         get() = prefs.getLong(KEY_MAX_WAIT_MS, CaptureConfig.MAX_WAIT_MS).coerceIn(CaptureConfig.MAX_WAIT_MIN_MS, CaptureConfig.MAX_WAIT_MAX_MS)
         set(value) = prefs.edit().putLong(KEY_MAX_WAIT_MS, value).apply()
