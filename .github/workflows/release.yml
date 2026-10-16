@@ -59,6 +59,17 @@ jobs:
           cp app/build/outputs/apk/release/app-release.apk qa-capture.apk
           rm -f "$KEYSTORE_PATH"
 
+      # 외부 전송 없음 보장: APK 에 네트워크 권한이 들어 있으면 배포하지 않는다
+      - name: 네트워크 권한 없음 확인
+        run: |
+          AAPT2="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/aapt2"
+          perms="$("$AAPT2" dump permissions qa-capture.apk)"
+          echo "$perms"
+          if echo "$perms" | grep -qE "INTERNET|ACCESS_NETWORK_STATE|ACCESS_WIFI_STATE|CHANGE_NETWORK_STATE"; then
+            echo "::error::APK 에 네트워크 권한이 들어 있습니다. AndroidManifest.xml 을 확인하세요."
+            exit 1
+          fi
+
       - name: 테스트 리포트 보관
         if: failure()
         uses: actions/upload-artifact@v7

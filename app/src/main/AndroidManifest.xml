@@ -1,7 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 권한 선언 없음. 런처와 IME 패키지를 무시 목록에 넣기 위한 조회만 선언한다. -->
+    <!--
+      권한 선언 없음. 네트워크 권한은 라이브러리가 끼워 넣지 못하게 명시적으로 제거한다
+      (외부 전송 없음 보장, CI 에서도 APK 권한을 확인한다).
+    -->
+    <uses-permission
+        android:name="android.permission.INTERNET"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.ACCESS_NETWORK_STATE"
+        tools:node="remove" />
+
+    <!-- 런처와 IME 패키지를 무시 목록에 넣기 위한 조회만 선언한다. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -14,10 +26,10 @@
 
     <application
         android:allowBackup="false"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+        android:theme="@style/Theme.QACapture">
 
         <activity
             android:name=".MainActivity"
@@ -27,6 +39,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ui.SessionActivity"
+            android:exported="false" />
 
         <!-- 클래스 이름을 바꾸면 덮어쓰기 설치 후 접근성 권한이 풀린다. 고정할 것. -->
         <service
@@ -40,6 +60,21 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- 알림창 빠른 설정 타일: 캡처 일시정지/재개. BIND_QUICK_SETTINGS_TILE 은 시스템만 가진 권한(앱이 요청하는 권한 아님). -->
+        <service
+            android:name=".capture.CaptureTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
         </service>
     </application>
 </manifest>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 색 역할(어두운 테마). values/colors.xml 과 같은 이름. -->
+    <color name="primary">#AEC6FF</color>
+    <color name="on_primary">#0B2E5F</color>
+    <color name="secondary_container">#3A4252</color>
+    <color name="on_secondary_container">#DCE2F0</color>
+    <color name="background">#111317</color>
+    <color name="surface">#1A1D22</color>
+    <color name="on_surface">#E3E4E8</color>
+    <color name="on_surface_variant">#C1C6CF</color>
+    <color name="outline">#8B9099</color>
+    <color name="outline_variant">#353940</color>
+
+    <color name="status_running">#6BCB82</color>
+    <color name="status_paused">#9EA3AC</color>
+    <color name="status_off">#FF8A80</color>
+
+    <bool name="light_system_bars">false</bool>
+</resources>

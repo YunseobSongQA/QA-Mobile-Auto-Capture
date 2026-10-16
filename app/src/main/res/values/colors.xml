@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Material 3 색 역할(밝은 테마). 남색 1색 + 회색 톤.
+      상태 색(초록 = 동작 중, 회색 = 일시정지, 빨강 = 서비스 꺼짐)은 상태 표시에만 쓴다.
+    -->
+    <color name="primary">#24457A</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="secondary_container">#E1E5EE</color>
+    <color name="on_secondary_container">#1B2433</color>
+    <color name="background">#F6F7FA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="on_surface">#1A1C1F</color>
+    <color name="on_surface_variant">#4A4F57</color>
+    <color name="outline">#747983</color>
+    <color name="outline_variant">#DCDFE5</color>
+
+    <color name="status_running">#1E7E34</color>
+    <color name="status_paused">#6B7079</color>
+    <color name="status_off">#C62828</color>
+
+    <!-- 앱 아이콘 배경(테마와 상관없이 고정) -->
+    <color name="ic_launcher_background">#24457A</color>
+
+    <!-- 상태바·내비게이션바 아이콘을 어둡게(밝은 배경) -->
+    <bool name="light_system_bars">true</bool>
+</resources>

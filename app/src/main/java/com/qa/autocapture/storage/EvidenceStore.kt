@@ -1,25 +1,25 @@
 package com.qa.autocapture.storage
 
+import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ColorSpace
-import android.hardware.HardwareBuffer
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
-import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
+import com.qa.autocapture.capture.CaptureConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.File
-import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.io.OutputStreamWriter
@@ -30,21 +30,22 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** 화면 1개의 저장 결과(manifest 의 screens 항목). 시각은 epoch millis. */
-class ScreenRecord(
-    val seq: Int,
-    val files: List<String>,
-    val packageName: String,
-    val className: String,
-    val enteredAt: Long,
-    val exitedAt: Long,
-    val frames: Int,
-    val stitch: String,
-)
+/** 저장한 캡처 1장(manifest 의 captures 항목). 시각은 epoch millis. */
+class CaptureRecord(var file: String, val at: Long, var final: Boolean)
+
+/** 화면 방문 1번(manifest 의 screens 항목). 그 방문에서 첫 캡처를 저장할 때 만든다. */
+class ScreenRecord(val seq: Int, val packageName: String, val className: String, val enteredAt: Long) {
+    var exitedAt: Long? = null
+    val captures = mutableListOf<CaptureRecord>()
+
+    /** 스크롤한 화면을 이어붙인 긴 이미지 파일(…_full.png). */
+    var full: List<String> = emptyList()
+}
 
 /** 세션 중 감지한 토스트(manifest 의 toasts 항목). [screen] = 그때 화면의 className. */
 class ToastRecord(val at: Long, val packageName: String, val text: String, val screen: String?)
@@ -55,15 +56,18 @@ class SessionData(val id: String, val startedAt: Long) {
     var ended = false
     val screens = mutableListOf<ScreenRecord>()
     val toasts = mutableListOf<ToastRecord>()
+
+    /** 저장한 이미지 수(캡처 + 긴 이미지). */
+    val imageCount: Int get() = screens.sumOf { it.captures.size + it.full.size }
 }
 
-/** 화면 구간의 임시 정보(구간 폴더의 screen.json). */
-class ScreenInfo(val packageName: String, val className: String, val enteredAt: Long)
+/** MediaStore 에 저장된 내 파일 1개. */
+class StoredFile(val uri: Uri, val name: String, val mime: String?)
 
 /**
  * 파일 입출력 담당.
- * - 임시 프레임: noBackupFiles/sessions/{세션}/frames/{구간}/{번호}.png
  * - 결과물: MediaStore → Documents/QAEvidence/{세션}/ (저장소 권한 없이 내 파일만 다룬다)
+ * - 세션 목록·복구용 기록: noBackupFiles/sessions/{세션}/session.json
  */
 class EvidenceStore(context: Context) {
 
@@ -72,7 +76,8 @@ class EvidenceStore(context: Context) {
     private val root = File(app.noBackupFilesDir, "sessions")
     private val collection: Uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
-    // ── 임시 프레임 ──────────────────────────────────────────────
+    /** 세션별 manifest.json 항목. 저장할 때마다 다시 조회하지 않게 기억한다. */
+    private val manifestUris = HashMap<String, Uri>()
 
     fun newSessionId(startedAt: Long): String {
         val base = format(startedAt, "yyyyMMdd_HHmmss")
@@ -83,56 +88,21 @@ class EvidenceStore(context: Context) {
         return id
     }
 
-    fun segmentDir(sessionId: String, segment: Int) =
-        File(root, "$sessionId/frames/" + String.format(Locale.ROOT, "%04d", segment))
+    // ── 이미지 ──────────────────────────────────────────────────
 
-    fun pendingSegments(sessionId: String): List<File> =
-        File(root, "$sessionId/frames").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
+    fun savePng(relativePath: String, name: String, bitmap: Bitmap): Uri =
+        saveFile(relativePath, name, "image/png") { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
 
-    fun writeScreenInfo(dir: File, info: ScreenInfo) {
-        dir.mkdirs()
-        val json = JSONObject()
-            .put("packageName", info.packageName)
-            .put("className", info.className)
-            .put("enteredAt", info.enteredAt)
-        File(dir, SCREEN_FILE).writeText(json.toString())
-    }
-
-    fun readScreenInfo(dir: File): ScreenInfo? = try {
-        val o = JSONObject(File(dir, SCREEN_FILE).readText())
-        ScreenInfo(o.getString("packageName"), o.getString("className"), o.getLong("enteredAt"))
+    /** 내 파일의 이름을 바꾼다. 성공하면 true. */
+    fun rename(uri: Uri, name: String): Boolean = try {
+        resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, name) }, null, null) > 0
     } catch (e: Exception) {
-        null
+        Log.w(TAG, "이름 변경 실패: $name", e)
+        false
     }
 
-    /** 스크린샷 버퍼를 임시 PNG 로 저장한다. 버퍼와 Bitmap 은 여기서 바로 해제한다. */
-    fun writeFrame(dir: File, index: Int, buffer: HardwareBuffer, colorSpace: ColorSpace?) {
-        var hardware: Bitmap? = null
-        var software: Bitmap? = null
-        try {
-            hardware = Bitmap.wrapHardwareBuffer(buffer, colorSpace) ?: return
-            software = hardware.copy(Bitmap.Config.ARGB_8888, false) ?: return
-            dir.mkdirs()
-            val tmp = File(dir, "$index.tmp")
-            BufferedOutputStream(FileOutputStream(tmp)).use { software.compress(Bitmap.CompressFormat.PNG, 100, it) }
-            // 끝까지 쓴 파일만 .png 로 보이게 해서 반쯤 쓴 프레임을 읽지 않는다
-            tmp.renameTo(File(dir, "$index.png"))
-        } catch (e: Exception) {
-            Log.w(TAG, "프레임 저장 실패", e)
-        } finally {
-            software?.recycle()
-            hardware?.recycle()
-            buffer.close()
-        }
-    }
-
-    fun listFrames(dir: File): List<File> =
-        dir.listFiles { f -> f.name.endsWith(".png") }
-            ?.sortedBy { it.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE }
-            ?: emptyList()
-
-    /** 임시 프레임 PNG 를 sRGB ARGB 픽셀로 읽는다. 같은 크기면 Bitmap 을 재사용한다. */
-    class FrameReader : Closeable {
+    /** 저장한 PNG 를 sRGB ARGB 픽셀로 읽는다(스티칭용). 같은 크기면 Bitmap 을 재사용한다. */
+    class FrameReader(private val resolver: ContentResolver) : Closeable {
         private var bitmap: Bitmap? = null
         var width = 0
             private set
@@ -140,8 +110,8 @@ class EvidenceStore(context: Context) {
             private set
 
         /** [into] 크기가 맞으면 거기에 채워 돌려주고, 아니면 새 배열을 만든다. 읽기 실패 시 null. */
-        fun read(file: File, into: IntArray?): IntArray? {
-            val bmp = decode(file) ?: return null
+        fun read(uri: Uri, into: IntArray?): IntArray? {
+            val bmp = decode(uri) ?: return null
             width = bmp.width
             height = bmp.height
             val px = if (into != null && into.size == width * height) into else IntArray(width * height)
@@ -149,14 +119,14 @@ class EvidenceStore(context: Context) {
             return px
         }
 
-        private fun decode(file: File): Bitmap? {
+        private fun decode(uri: Uri): Bitmap? {
             val opts = BitmapFactory.Options().apply {
                 inMutable = true
                 inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
                 inBitmap = bitmap
             }
             val reused = try {
-                BitmapFactory.decodeFile(file.path, opts)
+                open(uri, opts)
             } catch (e: IllegalArgumentException) {
                 null // 크기가 달라 재사용 불가
             }
@@ -164,8 +134,11 @@ class EvidenceStore(context: Context) {
             bitmap?.recycle()
             bitmap = null
             opts.inBitmap = null
-            return BitmapFactory.decodeFile(file.path, opts)?.also { bitmap = it }
+            return open(uri, opts)?.also { bitmap = it }
         }
+
+        private fun open(uri: Uri, opts: BitmapFactory.Options): Bitmap? =
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
 
         override fun close() {
             bitmap?.recycle()
@@ -183,34 +156,39 @@ class EvidenceStore(context: Context) {
         tmp.writeText(internal)
         tmp.renameTo(File(dir, SESSION_FILE))
 
-        // 화면이 하나도 없는 세션은 공개 폴더를 만들지 않는다
-        if (session.screens.isNotEmpty()) {
-            writeText(sessionPath(session.id), MANIFEST_FILE, "application/json", toJson(session).toString(2))
-        }
+        // 이미지가 하나도 없는 세션은 manifest 를 만들지 않는다
+        if (session.screens.isNotEmpty()) writeManifest(session.id, toJson(session).toString(2))
     }
 
     fun loadSessions(): List<SessionData> =
         root.listFiles()?.mapNotNull { readSession(it) }?.sortedByDescending { it.startedAt } ?: emptyList()
 
+    fun loadSession(sessionId: String): SessionData? = readSession(File(root, sessionId))
+
     private fun readSession(dir: File): SessionData? = try {
         val o = JSONObject(File(dir, SESSION_FILE).readText())
         SessionData(o.getString("session"), parseTime(o.getString("startedAt"))).apply {
-            endedAt = o.optString("endedAt").takeIf { it.isNotEmpty() && it != "null" }?.let { parseTime(it) }
+            endedAt = optTime(o, "endedAt")
             ended = o.optBoolean("ended")
-            val arr = o.getJSONArray("screens")
+            val arr = o.optJSONArray("screens") ?: JSONArray()
             for (i in 0 until arr.length()) {
                 val s = arr.getJSONObject(i)
-                val files = s.getJSONArray("files")
-                screens += ScreenRecord(
-                    seq = s.getInt("seq"),
-                    files = List(files.length()) { files.getString(it) },
-                    packageName = s.getString("packageName"),
-                    className = s.getString("className"),
-                    enteredAt = parseTime(s.getString("enteredAt")),
-                    exitedAt = parseTime(s.getString("exitedAt")),
-                    frames = s.getInt("frames"),
-                    stitch = s.getString("stitch"),
-                )
+                val enteredAt = parseTime(s.getString("enteredAt"))
+                val screen = ScreenRecord(s.getInt("seq"), s.getString("packageName"), s.getString("className"), enteredAt)
+                screen.exitedAt = optTime(s, "exitedAt")
+                val captures = s.optJSONArray("captures")
+                if (captures != null) {
+                    for (j in 0 until captures.length()) {
+                        val c = captures.getJSONObject(j)
+                        screen.captures += CaptureRecord(c.getString("file"), parseTime(c.getString("at")), c.optBoolean("final"))
+                    }
+                } else {
+                    // 이전 버전 기록(화면마다 스티칭한 PNG 의 files 목록)
+                    val files = s.optJSONArray("files") ?: JSONArray()
+                    for (j in 0 until files.length()) screen.captures += CaptureRecord(files.getString(j), enteredAt, false)
+                }
+                s.optJSONArray("full")?.let { full -> screen.full = List(full.length()) { full.getString(it) } }
+                screens += screen
             }
             val toastArr = o.optJSONArray("toasts") ?: JSONArray()
             for (i in 0 until toastArr.length()) {
@@ -231,16 +209,19 @@ class EvidenceStore(context: Context) {
         val info = app.packageManager.getPackageInfo(app.packageName, 0)
         val screens = JSONArray()
         for (s in session.screens) {
+            val captures = JSONArray()
+            for (c in s.captures) {
+                captures.put(JSONObject().put("file", c.file).put("at", isoTime(c.at)).put("final", c.final))
+            }
             screens.put(
                 JSONObject()
                     .put("seq", s.seq)
-                    .put("files", JSONArray(s.files))
                     .put("packageName", s.packageName)
                     .put("className", s.className)
                     .put("enteredAt", isoTime(s.enteredAt))
-                    .put("exitedAt", isoTime(s.exitedAt))
-                    .put("frames", s.frames)
-                    .put("stitch", s.stitch),
+                    .put("exitedAt", s.exitedAt?.let { isoTime(it) } ?: JSONObject.NULL)
+                    .put("captures", captures)
+                    .put("full", JSONArray(s.full)),
             )
         }
         val toasts = JSONArray()
@@ -292,7 +273,7 @@ class EvidenceStore(context: Context) {
         }
     }
 
-    /** 계속 덧붙여 쓸 MediaStore 파일을 만든다(디버그 로그). 스트림은 호출자가 닫는다. */
+    /** 계속 덧붙여 쓸 MediaStore 파일을 만든다(세션 로그, 디버그 로그). 스트림은 호출자가 닫는다. */
     fun createStream(relativePath: String, name: String, mime: String): OutputStream {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -306,19 +287,27 @@ class EvidenceStore(context: Context) {
         }
     }
 
-    /** 같은 이름이 있으면 덮어쓰고, 없으면 새로 만든다. */
-    private fun writeText(relativePath: String, name: String, mime: String, text: String) {
+    /** manifest.json 을 덮어쓴다. 없거나 지워졌으면 새로 만든다. */
+    private fun writeManifest(sessionId: String, text: String) {
         val bytes = text.toByteArray()
-        val existing = find(relativePath, name)
-        if (existing == null) {
-            saveFile(relativePath, name, mime) { it.write(bytes) }
-            return
+        val path = sessionPath(sessionId)
+        val existing = manifestUris[sessionId] ?: findFile(path, MANIFEST_FILE)
+        if (existing != null) {
+            try {
+                val out = resolver.openOutputStream(existing, "wt")
+                if (out != null) {
+                    out.use { it.write(bytes) }
+                    manifestUris[sessionId] = existing
+                    return
+                }
+            } catch (e: IOException) {
+                Log.w(TAG, "manifest 덮어쓰기 실패, 새로 만듭니다", e)
+            }
         }
-        val out = resolver.openOutputStream(existing, "wt") ?: throw IOException("파일을 열 수 없습니다: $name")
-        out.use { it.write(bytes) }
+        manifestUris[sessionId] = saveFile(path, MANIFEST_FILE, "application/json") { it.write(bytes) }
     }
 
-    private fun find(relativePath: String, name: String): Uri? = resolver.query(
+    fun findFile(relativePath: String, name: String): Uri? = resolver.query(
         collection,
         arrayOf(MediaStore.MediaColumns._ID),
         "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
@@ -326,26 +315,39 @@ class EvidenceStore(context: Context) {
         null,
     )?.use { c -> if (c.moveToFirst()) ContentUris.withAppendedId(collection, c.getLong(0)) else null }
 
+    /** 세션 폴더의 내 파일(이미지, manifest.json, session_log.txt)을 이름순으로. */
+    fun listFiles(sessionId: String): List<StoredFile> {
+        val out = ArrayList<StoredFile>()
+        resolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.MIME_TYPE),
+            "${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+            arrayOf(sessionPath(sessionId)),
+            "${MediaStore.MediaColumns.DISPLAY_NAME} ASC",
+        )?.use { c ->
+            while (c.moveToNext()) out += StoredFile(ContentUris.withAppendedId(collection, c.getLong(0)), c.getString(1), c.getString(2))
+        }
+        return out
+    }
+
+    /** 텍스트 파일을 읽는다. [maxBytes] 보다 길면 뒷부분만. */
+    fun readText(uri: Uri, maxBytes: Int): String {
+        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return ""
+        val from = maxOf(0, bytes.size - maxBytes)
+        return String(bytes, from, bytes.size - from, Charsets.UTF_8)
+    }
+
     /**
      * 세션 폴더의 내 파일을 zip 으로 묶어 Documents/QAEvidence/{세션}.zip 에 저장한다(기존 zip 은 교체).
      * 공유 인텐트에 그대로 쓸 수 있는 URI 를 돌려준다.
      */
     fun exportZip(sessionId: String): Uri {
-        val items = mutableListOf<Pair<Uri, String>>()
-        resolver.query(
-            collection,
-            arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME),
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=?",
-            arrayOf(sessionPath(sessionId)),
-            "${MediaStore.MediaColumns.DISPLAY_NAME} ASC",
-        )?.use { c ->
-            while (c.moveToNext()) items += ContentUris.withAppendedId(collection, c.getLong(0)) to c.getString(1)
-        }
+        val items = listFiles(sessionId).map { it.uri to it.name }.toMutableList()
         if (items.isEmpty()) throw IOException("저장된 파일이 없습니다")
-        find(DEBUG_PATH, "$sessionId.txt")?.let { items += it to "debug_log.txt" }
+        findFile(DEBUG_PATH, "$sessionId.txt")?.let { items += it to "debug_log.txt" }
 
         val zipName = "$sessionId.zip"
-        find(ROOT_PATH, zipName)?.let { resolver.delete(it, null, null) }
+        findFile(ROOT_PATH, zipName)?.let { resolver.delete(it, null, null) }
         return saveFile(ROOT_PATH, zipName, "application/zip") { out ->
             val zip = ZipOutputStream(out)
             zip.setLevel(Deflater.BEST_SPEED) // PNG 는 이미 압축돼 있다
@@ -360,12 +362,11 @@ class EvidenceStore(context: Context) {
 
     companion object {
         private const val TAG = "EvidenceStore"
-        private const val SCREEN_FILE = "screen.json"
         private const val SESSION_FILE = "session.json"
         private const val MANIFEST_FILE = "manifest.json"
 
-        /** 구간 폴더 안에서 "토스트 순간" 프레임을 두는 하위 폴더(스티칭 대상 아님). */
-        const val TOAST_DIR = "toast"
+        /** 세션 폴더의 텍스트 로그(토스트 문구, 화면 진입, 저장한 파일을 시각과 함께). */
+        const val SESSION_LOG_FILE = "session_log.txt"
 
         /** 결과물 최상위 폴더(MediaStore RELATIVE_PATH). */
         val ROOT_PATH = "${Environment.DIRECTORY_DOCUMENTS}/QAEvidence/"
@@ -375,7 +376,7 @@ class EvidenceStore(context: Context) {
 
         fun sessionPath(sessionId: String) = "$ROOT_PATH$sessionId/"
 
-        /** {순번3자리}_{패키지 끝부분}_{화면클래스 짧은이름}_{HHmmss} */
+        /** {화면순번3자리}_{패키지 끝부분}_{화면클래스 짧은이름}_{진입 HHmmss} */
         fun baseName(seq: Int, packageName: String, className: String, enteredAt: Long): String =
             String.format(
                 Locale.ROOT,
@@ -388,84 +389,113 @@ class EvidenceStore(context: Context) {
 
         private fun clean(s: String) = s.replace(Regex("[^A-Za-z0-9]"), "_").take(40).ifEmpty { "unknown" }
 
-        private val ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.ROOT)
+        private val ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.ROOT)
 
         fun isoTime(millis: Long): String = ISO.format(Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()))
 
-        private fun parseTime(s: String): Long = OffsetDateTime.parse(s, ISO).toInstant().toEpochMilli()
+        /** 밀리초가 없는 이전 버전 기록도 읽는다. */
+        private fun parseTime(s: String): Long = OffsetDateTime.parse(s).toInstant().toEpochMilli()
+
+        private fun optTime(o: JSONObject, key: String): Long? =
+            o.optString(key).takeIf { it.isNotEmpty() && it != "null" }?.let { parseTime(it) }
 
         fun format(millis: Long, pattern: String): String =
             DateTimeFormatter.ofPattern(pattern, Locale.ROOT).format(Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()))
     }
 }
 
-/** 메인 화면의 스위치 값. 서비스와 같은 프로세스라 SharedPreferences 로 공유한다. */
+/** 설정 값. 서비스·화면·빠른 설정 타일이 같은 프로세스라 SharedPreferences 로 공유한다(재부팅 후에도 유지). */
 class Options(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("options", Context.MODE_PRIVATE)
 
-    /** 토스트가 뜬 순간도 별도 PNG(…_toast.png)로 저장한다. */
-    var saveToastShot: Boolean
-        get() = prefs.getBoolean(KEY_TOAST_SHOT, false)
-        set(value) = prefs.edit().putBoolean(KEY_TOAST_SHOT, value).apply()
+    /** 마스터 스위치. 끄면 접근성 서비스는 켜 둔 채 플로팅 버튼을 숨기고 이벤트 처리·캡처를 모두 멈춘다. */
+    var captureEnabled: Boolean
+        get() = prefs.getBoolean(KEY_CAPTURE_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_CAPTURE_ENABLED, value).apply()
+
+    /** 이 시간 동안 화면 변화가 없으면 최종 화면(_final)을 찍는다. */
+    var settleMs: Long
+        get() = prefs.getLong(KEY_SETTLE_MS, CaptureConfig.SETTLE_MS).coerceIn(CaptureConfig.SETTLE_MIN_MS, CaptureConfig.SETTLE_MAX_MS)
+        set(value) = prefs.edit().putLong(KEY_SETTLE_MS, value).apply()
+
+    /** 변화가 계속돼도 이 시간이 지나면 그 시점 화면을 _final 로 찍는다. */
+    var maxWaitMs: Long
+        get() = prefs.getLong(KEY_MAX_WAIT_MS, CaptureConfig.MAX_WAIT_MS).coerceIn(CaptureConfig.MAX_WAIT_MIN_MS, CaptureConfig.MAX_WAIT_MAX_MS)
+        set(value) = prefs.edit().putLong(KEY_MAX_WAIT_MS, value).apply()
 
     /** 기록 중 받은 접근성 이벤트를 디버그 로그로 저장한다. */
     var debugLog: Boolean
         get() = prefs.getBoolean(KEY_DEBUG_LOG, false)
         set(value) = prefs.edit().putBoolean(KEY_DEBUG_LOG, value).apply()
 
-    private companion object {
-        const val KEY_TOAST_SHOT = "save_toast_shot"
-        const val KEY_DEBUG_LOG = "debug_log"
+    fun resetTiming() {
+        prefs.edit().remove(KEY_SETTLE_MS).remove(KEY_MAX_WAIT_MS).apply()
+    }
+
+    /** 리스너는 약한 참조로 등록되므로 호출자가 필드로 들고 있어야 한다. 콜백은 메인 스레드에서 온다. */
+    fun listen(listener: SharedPreferences.OnSharedPreferenceChangeListener) = prefs.registerOnSharedPreferenceChangeListener(listener)
+
+    fun unlisten(listener: SharedPreferences.OnSharedPreferenceChangeListener) = prefs.unregisterOnSharedPreferenceChangeListener(listener)
+
+    companion object {
+        const val KEY_CAPTURE_ENABLED = "capture_enabled"
+        private const val KEY_SETTLE_MS = "settle_ms"
+        private const val KEY_MAX_WAIT_MS = "max_wait_ms"
+        private const val KEY_DEBUG_LOG = "debug_log"
     }
 }
 
 /**
- * 기록 중 받은 접근성 이벤트를 Documents/QAEvidence/debug/{세션}.txt 에 한 줄씩 쓴다(탭 구분).
- * 쓰기는 전용 스레드에서 하고 1초마다 flush 해 비정상 종료 때도 대부분 남긴다.
+ * MediaStore 텍스트 파일에 한 줄씩 덧붙여 쓴다. 한 줄 = 시각(HH:mm:ss.SSS) + 탭으로 구분한 필드.
+ * 세션 로그(세션 폴더의 session_log.txt)와 디버그 로그(debug/{세션}.txt)에 쓴다.
+ * 쓰기는 전용 스레드에서 하고, 마지막 쓰기 1초 뒤 flush 해 비정상 종료 때도 대부분 남긴다.
  */
-class DebugLog(context: Context, sessionId: String) : Closeable {
+class TextLog(context: Context, relativePath: String, name: String, header: List<String>) : Closeable {
 
     /** io 스레드에서만 쓴다. */
     private var writer: Writer? = null
-    private var lastFlush = 0L
+    private var flushScheduled = false
 
     init {
         val store = EvidenceStore(context)
         io.execute {
             try {
-                val out = store.createStream(EvidenceStore.DEBUG_PATH, "$sessionId.txt", "text/plain")
+                val out = store.createStream(relativePath, name, "text/plain")
                 writer = BufferedWriter(OutputStreamWriter(out, Charsets.UTF_8), 64 * 1024).apply {
-                    write("# QA 증적 캡처 디버그 로그 / 세션 $sessionId\n")
-                    write("# 시각\t이벤트 타입\t패키지\t클래스\t텍스트\t기타\n")
+                    for (line in header) write("$line\n")
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "디버그 로그를 만들 수 없습니다", e)
+                Log.w(TAG, "로그 파일을 만들 수 없습니다: $relativePath$name", e)
             }
         }
     }
 
-    /** 한 줄 기록. 이벤트 객체는 재사용되므로 호출자가 값을 꺼내서 넘긴다. */
-    fun log(millis: Long, type: String, packageName: CharSequence?, className: CharSequence?, text: CharSequence?, extra: String = "") {
+    /** 한 줄 기록. 접근성 이벤트 객체는 재사용되므로 호출자가 값을 꺼내서 넘긴다. */
+    fun write(millis: Long, vararg fields: CharSequence?) {
         io.execute {
             val w = writer ?: return@execute
             try {
                 w.write(TIME.format(Instant.ofEpochMilli(millis)))
-                for (field in arrayOf(type, packageName, className, text, extra)) {
+                for (field in fields) {
                     w.write('\t'.code)
                     w.write(clean(field))
                 }
                 w.write('\n'.code)
-                val now = SystemClock.uptimeMillis()
-                if (now - lastFlush >= FLUSH_INTERVAL_MS) {
-                    w.flush()
-                    lastFlush = now
+                if (!flushScheduled) {
+                    flushScheduled = true
+                    io.schedule({ flush() }, FLUSH_DELAY_MS, TimeUnit.MILLISECONDS)
                 }
             } catch (e: IOException) {
-                Log.w(TAG, "디버그 로그 쓰기 실패", e)
+                Log.w(TAG, "로그 쓰기 실패", e)
                 runCatching { w.close() }
                 writer = null
             }
         }
+    }
+
+    private fun flush() {
+        flushScheduled = false
+        runCatching { writer?.flush() }
     }
 
     override fun close() {
@@ -476,9 +506,9 @@ class DebugLog(context: Context, sessionId: String) : Closeable {
     }
 
     private companion object {
-        const val TAG = "DebugLog"
-        const val FLUSH_INTERVAL_MS = 1000L
-        val io = Executors.newSingleThreadExecutor { Thread(it, "qa-debug") }
+        const val TAG = "TextLog"
+        const val FLUSH_DELAY_MS = 1000L
+        val io = Executors.newSingleThreadScheduledExecutor { Thread(it, "qa-log") }
         val TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss.SSS", Locale.ROOT).withZone(ZoneId.systemDefault())
 
         fun clean(s: CharSequence?): String = s?.toString()?.replace('\t', ' ')?.replace('\n', ' ')?.replace('\r', ' ') ?: ""

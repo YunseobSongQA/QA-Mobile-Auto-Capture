@@ -17,7 +17,7 @@ import kotlin.math.hypot
 
 /**
  * TYPE_ACCESSIBILITY_OVERLAY 로 띄우는 플로팅 버튼(오버레이 권한 불필요).
- * 탭 = 기록 시작/정지, 길게 누르기 = 앱 열기, 끌기 = 이동.
+ * 탭 = 기록 시작/정지, 길게 누르기 = 앱 열기, 끌기 = 이동. 캡처 일시정지 중에는 서비스가 [remove] 해 숨긴다.
  * 캡처 직전에 숨기고 캡처 후 다시 보여 증적에 찍히지 않게 한다.
  */
 class FloatingButton(
@@ -63,6 +63,9 @@ class FloatingButton(
 
     fun show() {
         if (attached) return
+        // 캡처 중 숨긴 상태로 제거됐을 수 있으므로 보이는 상태로 되돌린 뒤 붙인다
+        view.visibility = View.VISIBLE
+        params.alpha = 1f
         wm.addView(view, params)
         attached = true
     }
@@ -73,12 +76,12 @@ class FloatingButton(
         attached = false
     }
 
-    /** 대기: "● 시작"(회색), 기록 중: "■ 저장된 화면 수"(빨강) */
-    fun setRecording(recording: Boolean, savedScreens: Int) {
-        view.text = if (recording) "■ $savedScreens" else "● 시작"
+    /** 대기: "● 시작"(남색), 기록 중: "■ 저장한 이미지 수"(초록 = 동작 중) */
+    fun setRecording(recording: Boolean, savedImages: Int) {
+        view.text = if (recording) "■ $savedImages" else "● 시작"
         shape.setColor(if (recording) RECORDING_COLOR else IDLE_COLOR)
         view.contentDescription =
-            if (recording) "QA 기록 중, 저장된 화면 ${savedScreens}개. 누르면 정지" else "QA 기록 시작"
+            if (recording) "QA 기록 중, 저장한 이미지 ${savedImages}장. 누르면 정지" else "QA 기록 시작"
     }
 
     /** 창 알파와 View 를 함께 숨긴다. 다음 화면 합성(수십 ms) 뒤에 캡처해야 한다. */
@@ -164,7 +167,8 @@ class FloatingButton(
     }
 
     private companion object {
-        const val IDLE_COLOR = 0xCC424242.toInt()
-        const val RECORDING_COLOR = 0xE6D32F2F.toInt()
+        // 앱 색과 맞춘다: 남색(primary), 초록(동작 중). 빨강은 "서비스 꺼짐" 전용이라 쓰지 않는다.
+        const val IDLE_COLOR = 0xE624457A.toInt()
+        const val RECORDING_COLOR = 0xE61E7E34.toInt()
     }
 }

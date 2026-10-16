@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 앱 아이콘 전경: 문서 + 체크(증적 확인). 108dp 캔버스, 가운데 66dp 안전 영역 안에 그린다. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 문서(오른쪽 위가 접힘) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,28H60L72,40V76A4,4 0,0 1,68 80H40A4,4 0,0 1,36 76V32A4,4 0,0 1,40 28Z" />
+    <!-- 접힌 모서리 -->
+    <path
+        android:fillColor="#C9D3E6"
+        android:pathData="M60,28L72,40H63A3,3 0,0 1,60 37Z" />
+    <!-- 글줄 -->
+    <path
+        android:fillColor="#C9D3E6"
+        android:pathData="M42,35H55V38H42ZM42,42H66V45H42Z" />
+    <!-- 체크 -->
+    <path
+        android:fillColor="#24457A"
+        android:pathData="M47.12,55.88L51,59.76L60.88,49.88L65.12,54.12L51,68.24L42.88,60.12Z" />
+</vector>

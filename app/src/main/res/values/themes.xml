@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 밝은/어두운 바탕 테마는 values-night 에서 바꾼다. 색은 colors.xml 의 Material 3 색 역할을 쓴다. -->
+    <style name="Base.QACapture" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.QACapture" parent="Base.QACapture">
+        <item name="android:colorPrimary">@color/primary</item>
+        <item name="android:colorPrimaryDark">@color/background</item>
+        <item name="android:colorAccent">@color/primary</item>
+        <item name="android:colorControlActivated">@color/primary</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:textColorPrimary">@color/on_surface</item>
+        <item name="android:textColorSecondary">@color/on_surface_variant</item>
+        <item name="android:statusBarColor">@color/background</item>
+        <item name="android:navigationBarColor">@color/background</item>
+        <item name="android:windowLightStatusBar">@bool/light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/light_system_bars</item>
+    </style>
+</resources>
