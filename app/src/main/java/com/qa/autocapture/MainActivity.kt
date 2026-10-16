@@ -25,7 +25,7 @@ import com.qa.autocapture.ui.Ui.Type
 
 /**
  * 앱 메인 화면(레이아웃 XML 없이 코드로 구성). 위에서부터
- * 1) 상태 카드 + 마스터 스위치  2) 처음 설정 안내(다 끝나면 숨김)  3) 저장된 세션 목록  4) 개인정보 및 권한.
+ * 1) 상태 카드 + 마스터 스위치  2) 설정 안내(4단계, 다 끝나면 접힘)  3) 저장된 세션 목록  4) 개인정보 및 권한.
  * 타이밍·디버그 로그 설정은 오른쪽 위 설정 화면(SettingsActivity)에 있다.
  */
 class MainActivity : Activity() {
@@ -41,14 +41,20 @@ class MainActivity : Activity() {
     private var bindingSwitch = false
 
     private lateinit var setupCard: LinearLayout
+    private lateinit var setupBody: LinearLayout
     private lateinit var setupProgress: TextView
+    private lateinit var setupChevron: View
     private val steps = ArrayList<Step>()
+    private var setupExpanded = true
+
+    /** 마지막으로 반영한 "모두 완료" 여부. 바뀔 때만 펼침/접힘을 기본값으로 되돌린다(사용자가 직접 연 상태 유지). */
+    private var setupAllDone: Boolean? = null
 
     private lateinit var sessionList: LinearLayout
     private var wasRecording = false
 
     /** 설정 단계 1개. [done] 은 화면에 돌아올 때마다 다시 확인한다. */
-    private class Step(val badgeHolder: LinearLayout, val action: View, val number: Int, val done: () -> Boolean)
+    private class Step(val badgeHolder: LinearLayout, val number: Int, val done: () -> Boolean)
 
     /** 서비스 상태(연결·기록·저장 수)가 바뀌면 호출된다. 기록이 끝나면 세션 목록도 새로 읽는다. */
     private val stateListener: () -> Unit = {
@@ -142,7 +148,8 @@ class MainActivity : Activity() {
             !serviceOn -> Triple(
                 R.color.status_off,
                 "서비스 꺼짐",
-                "접근성 서비스가 꺼져 있어 캡처할 수 없습니다. 아래 처음 설정 1단계부터 진행하세요.",
+                "접근성 서비스가 꺼져 있어 캡처할 수 없습니다. 아래 설정 안내를 1단계부터 따라 하세요. " +
+                    "앱을 업데이트한 뒤에도 다시 꺼질 수 있습니다.",
             )
             !captureOn -> Triple(
                 R.color.status_paused,
@@ -173,36 +180,64 @@ class MainActivity : Activity() {
         }
     }
 
-    // ── 2) 처음 설정 안내 ────────────────────────────────────────
+    // ── 2) 설정 안내 ─────────────────────────────────────────────
 
     private fun setupCard(): View {
         setupCard = ui.card()
-        val head = ui.row()
-        head.addView(ui.text("처음 설정", Type.TITLE_MEDIUM), LinearLayout.LayoutParams(0, Ui.WRAP, 1f))
+        val head = ui.row().apply {
+            background = ui.rowBackground()
+            setOnClickListener { setSetupExpanded(!setupExpanded) }
+        }
+        val titles = ui.column()
+        titles.addView(ui.text("설정 안내", Type.TITLE_MEDIUM))
         setupProgress = ui.text("", Type.BODY_SMALL, R.color.on_surface_variant)
-        head.addView(setupProgress)
+        titles.addView(setupProgress)
+        head.addView(titles, LinearLayout.LayoutParams(0, Ui.WRAP, 1f))
+        setupChevron = ui.icon(R.drawable.ic_chevron, R.color.on_surface_variant)
+        head.addView(setupChevron)
         setupCard.addView(head)
+        setupCard.addView(
+            ui.text("앱을 업데이트하면 이 과정을 다시 해야 합니다.", Type.LABEL_LARGE, R.color.primary),
+            LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP).apply { topMargin = ui.dp(8) },
+        )
 
+        setupBody = ui.column()
+        setupCard.addView(setupBody)
+        val accessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         val appInfo = { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))) }
+        val app = getString(R.string.app_name)
+        val serviceOn = { CaptureService.isEnabled(this) }
         addStep(
             1,
-            "접근성 서비스 켜기",
-            "설정 → 접근성 → 설치된 앱 → ${getString(R.string.app_name)} → 켜기. \"제한된 설정\" 안내가 뜨면 확인을 누르고 2단계를 먼저 하세요.",
-            "접근성 설정",
-            { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-        ) { CaptureService.isEnabled(this) }
+            "접근성 설정에서 앱을 한 번 누르기",
+            "[접근성 설정 열기] → 설치된 앱 → \"$app\"를 한 번 누릅니다. \"제한된 설정\" 팝업이 뜨면 [확인]을 누릅니다. " +
+                "이걸 먼저 해야 2단계의 \"제한된 설정 허용\" 메뉴가 나타납니다.",
+            "접근성 설정 열기",
+            accessibility,
+            serviceOn,
+        )
         addStep(
             2,
             "제한된 설정 허용",
-            "1단계에서 막히면: 앱 정보 → 오른쪽 위 ⋮ → 제한된 설정 허용 → 다시 1단계. 서비스가 켜지면 완료로 표시됩니다.",
-            "앱 정보",
+            "[앱 정보 열기] → 오른쪽 위 ⋮ → \"제한된 설정 허용\" → PIN(또는 지문)을 입력합니다. ⋮ 메뉴에 항목이 없으면 1단계를 먼저 하세요.",
+            "앱 정보 열기",
             appInfo,
-        ) { CaptureService.isEnabled(this) }
+            serviceOn,
+        )
         addStep(
             3,
-            "배터리 사용 \"제한 없음\"",
-            "앱 정보 → 배터리 → 제한 없음. 배터리 최적화로 서비스가 중간에 꺼지지 않게 합니다.",
-            "앱 정보",
+            "접근성 서비스 켜기",
+            "[접근성 설정 열기] → 설치된 앱 → $app → 스위치를 켜고 [허용]을 누릅니다. 켜지면 1~3단계가 자동으로 완료 표시됩니다.",
+            "접근성 설정 열기",
+            accessibility,
+            serviceOn,
+        )
+        addStep(
+            4,
+            "배터리 \"제한 없음\", 사용하지 않는 앱 관리 끄기",
+            "[앱 정보 열기] → 배터리 → \"제한 없음\"을 고릅니다. 앱 정보로 돌아와 \"사용하지 않는 앱 관리\"를 끕니다. " +
+                "서비스가 중간에 꺼지지 않게 합니다.",
+            "앱 정보 열기",
             appInfo,
         ) { getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(packageName) == true }
         return setupCard
@@ -218,11 +253,10 @@ class MainActivity : Activity() {
         val texts = ui.column()
         texts.addView(ui.text(title, Type.LABEL_LARGE))
         texts.addView(ui.text(help, Type.BODY_SMALL, R.color.on_surface_variant).apply { setPadding(0, ui.dp(2), 0, ui.dp(8)) })
-        val button = ui.button(actionLabel, ButtonStyle.TONAL, action)
-        texts.addView(button, LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP))
+        texts.addView(ui.button(actionLabel, ButtonStyle.TONAL, action), LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP))
         row.addView(texts, LinearLayout.LayoutParams(0, Ui.WRAP, 1f).apply { marginStart = ui.dp(12) })
-        setupCard.addView(row)
-        steps += Step(badgeHolder, button, number, done)
+        setupBody.addView(row)
+        steps += Step(badgeHolder, number, done)
     }
 
     private fun refreshSteps() {
@@ -232,10 +266,21 @@ class MainActivity : Activity() {
             if (done) completed++
             step.badgeHolder.removeAllViews()
             step.badgeHolder.addView(ui.stepBadge(step.number, done))
-            step.action.visibility = if (done) View.GONE else View.VISIBLE
         }
-        setupProgress.text = "${steps.size}단계 중 ${completed}단계 완료"
-        setupCard.visibility = if (completed == steps.size) View.GONE else View.VISIBLE
+        val allDone = completed == steps.size
+        setupProgress.text = if (allDone) "${steps.size}단계 모두 완료" else "${steps.size}단계 중 ${completed}단계 완료"
+        // 서비스가 꺼져 있으면(미완료) 펼치고, 다 끝나면 접는다
+        if (allDone != setupAllDone) {
+            setupAllDone = allDone
+            setSetupExpanded(!allDone)
+        }
+    }
+
+    private fun setSetupExpanded(expanded: Boolean) {
+        setupExpanded = expanded
+        setupBody.visibility = if (expanded) View.VISIBLE else View.GONE
+        setupChevron.rotation = if (expanded) 270f else 90f
+        setupChevron.contentDescription = if (expanded) "설정 안내 접기" else "설정 안내 펼치기"
     }
 
     // ── 3) 저장된 세션 ───────────────────────────────────────────

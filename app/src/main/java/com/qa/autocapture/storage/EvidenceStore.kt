@@ -1,6 +1,5 @@
 package com.qa.autocapture.storage
 
-import android.content.ContentResolver
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
@@ -20,7 +19,9 @@ import java.io.BufferedOutputStream
 import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.io.Writer
@@ -43,8 +44,8 @@ class ScreenRecord(val seq: Int, val packageName: String, val className: String,
     var exitedAt: Long? = null
     val captures = mutableListOf<CaptureRecord>()
 
-    /** 스크롤한 화면을 이어붙인 긴 이미지 파일(…_full.png). */
-    var full: List<String> = emptyList()
+    /** 스크롤하며 찍은 프레임을 이어붙인 긴 이미지 파일(…_scroll.png). */
+    var scroll: List<String> = emptyList()
 }
 
 /** 세션 중 감지한 토스트(manifest 의 toasts 항목). [screen] = 그때 화면의 className. */
@@ -57,17 +58,24 @@ class SessionData(val id: String, val startedAt: Long) {
     val screens = mutableListOf<ScreenRecord>()
     val toasts = mutableListOf<ToastRecord>()
 
-    /** 저장한 이미지 수(캡처 + 긴 이미지). */
-    val imageCount: Int get() = screens.sumOf { it.captures.size + it.full.size }
+    /** 저장한 이미지 수(캡처 + 스크롤 이미지). */
+    val imageCount: Int get() = screens.sumOf { it.captures.size + it.scroll.size }
 }
 
 /** MediaStore 에 저장된 내 파일 1개. */
 class StoredFile(val uri: Uri, val name: String, val mime: String?)
 
+/** 이어붙이기 임시 폴더의 정보: 그 화면의 순번과 결과 파일 이름 앞부분. */
+class ScrollInfo(val seq: Int, val base: String)
+
+/** 이어붙이기 임시 프레임 1장. [hint] = 직전 프레임부터의 scrollDeltaY 합(모르면 null), [base] = 스크롤 전 화면(이미 개별 캡처됨). */
+class ScrollFrameFile(val file: File, val hint: Int?, val base: Boolean)
+
 /**
  * 파일 입출력 담당.
  * - 결과물: MediaStore → Documents/QAEvidence/{세션}/ (저장소 권한 없이 내 파일만 다룬다)
  * - 세션 목록·복구용 기록: noBackupFiles/sessions/{세션}/session.json
+ * - 이어붙이기 임시 프레임: noBackupFiles/sessions/{세션}/scroll/{구간}/{번호}_{이동량}_{b|s}.png
  */
 class EvidenceStore(context: Context) {
 
@@ -101,8 +109,44 @@ class EvidenceStore(context: Context) {
         false
     }
 
-    /** 저장한 PNG 를 sRGB ARGB 픽셀로 읽는다(스티칭용). 같은 크기면 Bitmap 을 재사용한다. */
-    class FrameReader(private val resolver: ContentResolver) : Closeable {
+    // ── 이어붙이기 임시 프레임 ───────────────────────────────────
+
+    fun scrollDir(sessionId: String, segment: Int) =
+        File(root, "$sessionId/scroll/" + String.format(Locale.ROOT, "%04d", segment))
+
+    /** 끝나지 않은(비정상 종료로 남은) 이어붙이기 폴더. */
+    fun pendingScrollDirs(sessionId: String): List<File> =
+        File(root, "$sessionId/scroll").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
+
+    fun writeScrollInfo(dir: File, info: ScrollInfo) {
+        dir.mkdirs()
+        File(dir, SCROLL_INFO_FILE).writeText("${info.seq}\n${info.base}")
+    }
+
+    fun readScrollInfo(dir: File): ScrollInfo? = try {
+        val lines = File(dir, SCROLL_INFO_FILE).readLines()
+        ScrollInfo(lines[0].trim().toInt(), lines[1].trim())
+    } catch (e: Exception) {
+        null
+    }
+
+    /** 프레임을 임시 PNG 로 쓴다. 끝까지 쓴 파일만 .png 로 보이게 해서 반쯤 쓴 프레임을 읽지 않는다. */
+    fun writeScrollFrame(dir: File, index: Int, hint: Int?, base: Boolean, bitmap: Bitmap) {
+        dir.mkdirs()
+        val name = String.format(Locale.ROOT, "%04d_%s_%s.png", index, hint?.toString() ?: "n", if (base) "b" else "s")
+        val tmp = File(dir, "$name.tmp")
+        BufferedOutputStream(FileOutputStream(tmp)).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        if (!tmp.renameTo(File(dir, name))) throw IOException("임시 프레임 저장 실패: $name")
+    }
+
+    fun listScrollFrames(dir: File): List<ScrollFrameFile> =
+        dir.listFiles { f -> f.name.endsWith(".png") }?.sortedBy { it.name }?.mapNotNull { f ->
+            val parts = f.nameWithoutExtension.split('_')
+            if (parts.size != 3) null else ScrollFrameFile(f, parts[1].toIntOrNull(), parts[2] == "b")
+        } ?: emptyList()
+
+    /** PNG 를 sRGB ARGB 픽셀로 읽는다(스티칭용). 같은 크기면 Bitmap 을 재사용한다. */
+    class FrameReader : Closeable {
         private var bitmap: Bitmap? = null
         var width = 0
             private set
@@ -110,8 +154,8 @@ class EvidenceStore(context: Context) {
             private set
 
         /** [into] 크기가 맞으면 거기에 채워 돌려주고, 아니면 새 배열을 만든다. 읽기 실패 시 null. */
-        fun read(uri: Uri, into: IntArray?): IntArray? {
-            val bmp = decode(uri) ?: return null
+        fun read(open: () -> InputStream?, into: IntArray?): IntArray? {
+            val bmp = decode(open) ?: return null
             width = bmp.width
             height = bmp.height
             val px = if (into != null && into.size == width * height) into else IntArray(width * height)
@@ -119,14 +163,14 @@ class EvidenceStore(context: Context) {
             return px
         }
 
-        private fun decode(uri: Uri): Bitmap? {
+        private fun decode(open: () -> InputStream?): Bitmap? {
             val opts = BitmapFactory.Options().apply {
                 inMutable = true
                 inPreferredColorSpace = ColorSpace.get(ColorSpace.Named.SRGB)
                 inBitmap = bitmap
             }
             val reused = try {
-                open(uri, opts)
+                open()?.use { BitmapFactory.decodeStream(it, null, opts) }
             } catch (e: IllegalArgumentException) {
                 null // 크기가 달라 재사용 불가
             }
@@ -134,11 +178,8 @@ class EvidenceStore(context: Context) {
             bitmap?.recycle()
             bitmap = null
             opts.inBitmap = null
-            return open(uri, opts)?.also { bitmap = it }
+            return open()?.use { BitmapFactory.decodeStream(it, null, opts) }?.also { bitmap = it }
         }
-
-        private fun open(uri: Uri, opts: BitmapFactory.Options): Bitmap? =
-            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
 
         override fun close() {
             bitmap?.recycle()
@@ -187,7 +228,8 @@ class EvidenceStore(context: Context) {
                     val files = s.optJSONArray("files") ?: JSONArray()
                     for (j in 0 until files.length()) screen.captures += CaptureRecord(files.getString(j), enteredAt, false)
                 }
-                s.optJSONArray("full")?.let { full -> screen.full = List(full.length()) { full.getString(it) } }
+                // "full" = 이전 버전의 긴 이미지 기록
+                (s.optJSONArray("scroll") ?: s.optJSONArray("full"))?.let { a -> screen.scroll = List(a.length()) { a.getString(it) } }
                 screens += screen
             }
             val toastArr = o.optJSONArray("toasts") ?: JSONArray()
@@ -221,7 +263,7 @@ class EvidenceStore(context: Context) {
                     .put("enteredAt", isoTime(s.enteredAt))
                     .put("exitedAt", s.exitedAt?.let { isoTime(it) } ?: JSONObject.NULL)
                     .put("captures", captures)
-                    .put("full", JSONArray(s.full)),
+                    .put("scroll", JSONArray(s.scroll)),
             )
         }
         val toasts = JSONArray()
@@ -364,6 +406,7 @@ class EvidenceStore(context: Context) {
         private const val TAG = "EvidenceStore"
         private const val SESSION_FILE = "session.json"
         private const val MANIFEST_FILE = "manifest.json"
+        private const val SCROLL_INFO_FILE = "info.txt"
 
         /** 세션 폴더의 텍스트 로그(토스트 문구, 화면 진입, 저장한 파일을 시각과 함께). */
         const val SESSION_LOG_FILE = "session_log.txt"

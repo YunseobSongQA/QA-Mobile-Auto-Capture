@@ -39,6 +39,83 @@ object CaptureConfig {
 
     /** 바뀐 칸이 전체의 이 비율 이하이면 직전 저장 이미지와 "거의 같음" → 저장 생략. */
     const val SIMILAR_MAX_CHANGED_RATIO = 0.01
+
+    // ── 스크롤 이어붙이기 ─────────────────────────────────────────
+
+    /** 스크롤 이벤트와 내용 변경이 이만큼 없으면 "스크롤이 멈춤"으로 보고 이어붙일 프레임 1장을 찍는다. */
+    const val SCROLL_SETTLE_MS = 400L
+
+    /** 스크롤이 멈춘 뒤 내용 변경이 계속돼도(이미지 로딩, 배너) 마지막 스크롤 이벤트 후 이만큼 지나면 찍는다. */
+    const val SCROLL_MAX_WAIT_MS = 1500L
+
+    /** 이어붙인 이미지 1장의 최대 높이(px). 넘으면 프레임 경계에서 다음 장(_scroll2)으로 나눈다. */
+    const val MAX_STITCH_HEIGHT = 20_000
+
+    /** 행 비교에서 뺄 오른쪽 스크롤바 자리(폭 대비 비율). */
+    const val STITCH_EDGE_MARGIN_RATIO = 0.03
+
+    /** 행 해시를 만들 때 가로 샘플링 간격(px). */
+    const val STITCH_SAMPLE_STEP = 2
+
+    /** 행 비교로 찾은 겹침을 인정하기 위한 최소 득표 수(검증에 쓰는 최소 행 수도 같음). */
+    const val STITCH_MIN_VOTES = 10
+
+    /** 행 비교로 찾은 겹침 검증: 겹치는 구간에서 움직인 행 중 맞아야 하는 최소 비율. */
+    const val STITCH_MIN_MATCH_RATIO = 0.5
+
+    /** scrollDeltaY 로 받은 겹침 검증: 겹치는 구간에서 움직인 행 중 맞아야 하는 최소 비율(독립 근거라 더 엄격하게). */
+    const val STITCH_HINT_MIN_MATCH_RATIO = 0.8
+
+    /** 겹침을 못 찾았어도 바뀐 행이 이 비율 이하이면 같은 위치(시계·커서 변화)로 보고 버린다. */
+    const val STITCH_SAME_MAX_CHANGED_RATIO = 0.15
+}
+
+/**
+ * 스크롤 이어붙이기 모드와 "스크롤이 멈춤" 판단. 시각을 인자로 받는 순수 로직.
+ *
+ * 세로 스크롤 이벤트가 오면 모드를 시작한다. 스크롤 이벤트와 내용 변경이 settleMs 동안 없거나,
+ * 마지막 스크롤 이벤트 후 maxWaitMs 가 지나면 프레임 1장을 찍고 모드를 끝낸다.
+ */
+class ScrollTimer {
+
+    sealed interface Decision {
+        data object Idle : Decision
+
+        data class Wait(val at: Long) : Decision
+
+        /** 스크롤이 멈췄다. 이어붙일 프레임 1장을 찍는다. */
+        data object Capture : Decision
+    }
+
+    /** 이어붙이기 모드(스크롤 중이거나 멈춘 뒤 프레임을 기다리는 중). */
+    var active = false
+        private set
+
+    private var lastScroll = 0L
+    private var lastActivity = 0L
+
+    fun onScroll(now: Long) {
+        active = true
+        lastScroll = now
+        if (now > lastActivity) lastActivity = now
+    }
+
+    /** 스크롤 중 내용 변경(새 항목 그리기, 이미지 로딩)은 멈춤 대기에 포함한다. */
+    fun onActivity(now: Long) {
+        if (active && now > lastActivity) lastActivity = now
+    }
+
+    fun cancel() {
+        active = false
+    }
+
+    fun evaluate(now: Long, settleMs: Long, maxWaitMs: Long): Decision {
+        if (!active) return Decision.Idle
+        val at = minOf(lastActivity + settleMs, lastScroll + maxWaitMs)
+        if (now < at) return Decision.Wait(at)
+        active = false
+        return Decision.Capture
+    }
 }
 
 /**

@@ -1,6 +1,8 @@
 package com.qa.autocapture.stitch
 
+import com.qa.autocapture.capture.CaptureConfig
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
@@ -27,6 +29,7 @@ class StitcherTest {
     private val content = syntheticContent(w, 3000, seed = 7)
     private val header = header(clock = 0)
     private val footer = solidBlock(w, footerH, seed = 3, base = 0xFFF2F2F2.toInt())
+    private val periodic = periodicContent(1200, period = 37, seed = 5)
 
     // ── 기본 시나리오 ──────────────────────────────────────────────
 
@@ -141,7 +144,86 @@ class StitcherTest {
         val frames = offsets.map { o -> compose(listOf(header, longContent.copyRows(o, o + viewH), footer)) }
         val plan = Stitcher.plan(frames.map { Image(w, h, it).toFrame() })
         assertEquals("split", plan.result)
-        assertTrue(plan.parts.all { it.height <= Stitcher.MAX_PART_HEIGHT })
+        assertTrue(plan.parts.all { it.height <= CaptureConfig.MAX_STITCH_HEIGHT })
+    }
+
+    // ── scrollDeltaY 힌트 ────────────────────────────────────────
+
+    @Test
+    fun `scrollDeltaY 힌트가 맞으면 그대로 써서 원본과 같다`() {
+        val offsets = listOf(0, 120, 250, 400, 690, 900)
+        val result = stitch(offsets.map { frame(it) }, hints = deltas(offsets))
+        assertEquals("ok", result.plan.result)
+        assertImage(expected(0, offsets.last()), result.images.single())
+    }
+
+    @Test
+    fun `힌트가 틀리면 행 비교로 겹침을 찾는다`() {
+        val offsets = listOf(0, 120, 250, 400, 690)
+        val wrong = deltas(offsets).map { it?.plus(37) }
+        val result = stitch(offsets.map { frame(it) }, hints = wrong)
+        assertImage(expected(0, offsets.last()), result.images.single())
+    }
+
+    @Test
+    fun `반복 무늬라 행 비교로 못 찾아도 힌트로 이어붙인다`() {
+        val offsets = listOf(0, 100, 200, 300)
+        val frames = offsets.map { frameOf(periodic, it) }
+        // 행이 화면 안에서 여러 번 나와 투표할 행이 없다 → 힌트 없이는 나뉜다
+        assertNotEquals("ok", stitch(frames).plan.result)
+        val result = stitch(frames, hints = deltas(offsets))
+        assertEquals("ok", result.plan.result)
+        assertImage(expectedOf(periodic, 0, offsets.last()), result.images.single())
+    }
+
+    @Test
+    fun `같은 위치로 버린 프레임이 있어도 힌트를 이어서 쓴다`() {
+        val offsets = listOf(0, 100, 100, 200)
+        // 세 번째는 같은 위치에서 시계만 바뀐 프레임(버림)
+        val frames = offsets.mapIndexed { i, o -> frameOf(periodic, o, clock = if (i == 2) 1 else 0) }
+        val result = stitch(frames, hints = deltas(offsets))
+        assertEquals(3, result.plan.usedFrames)
+        assertImage(expectedOf(periodic, 0, 200), result.images.single())
+    }
+
+    @Test
+    fun `힌트가 있어도 겹침이 없으면 억지로 붙이지 않고 나눈다`() {
+        val offsets = listOf(0, 200, 380, 1800, 2000)
+        val result = stitch(offsets.map { frame(it) }, hints = deltas(offsets))
+        assertEquals("split", result.plan.result)
+        assertEquals(2, result.images.size)
+        assertImage(expected(0, 380), result.images[0])
+        assertImage(expected(1800, 2000), result.images[1])
+    }
+
+    // ── 고정 영역 판별 ───────────────────────────────────────────
+
+    @Test
+    fun `고정 영역 판별 - 상단 헤더와 하단 탭바 높이를 찾는다`() {
+        val rows = listOf(0, 150, 300).map { Image(w, h, frameOf(periodic, it)).toFrame().rows }
+        assertEquals(headerH to footerH, Stitcher.fixedArea(rows))
+    }
+
+    @Test
+    fun `고정 영역 판별 - 상태바 높이가 더 크면 그 값을 쓴다`() {
+        val rows = listOf(0, 150).map { Image(w, h, frameOf(periodic, it)).toFrame().rows }
+        assertEquals(60 to footerH, Stitcher.fixedArea(rows, topInset = 60, bottomInset = navH))
+    }
+
+    @Test
+    fun `고정 영역 판별 - 움직임이 없으면 상태바와 내비게이션바 높이로 되돌린다`() {
+        val f = Image(w, h, frame(300)).toFrame().rows
+        assertEquals(statusH to navH, Stitcher.fixedArea(listOf(f, f.copyOf()), statusH, navH))
+    }
+
+    @Test
+    fun `고정 영역은 결과 맨 위와 맨 아래에 한 번씩만 나온다`() {
+        val offsets = listOf(0, 100, 200, 300)
+        val result = stitch(offsets.map { frameOf(periodic, it) }, hints = deltas(offsets))
+        val img = result.images.single()
+        assertEquals(headerH + (300 + viewH) + footerH, img.height)
+        assertImage(Image(w, headerH, header), Image(w, headerH, img.pixels.copyOfRange(0, headerH * w)))
+        assertImage(Image(w, footerH, footer), Image(w, footerH, img.pixels.copyOfRange((img.height - footerH) * w, img.height * w)))
     }
 
     // ── 도우미 ───────────────────────────────────────────────────
@@ -153,8 +235,8 @@ class StitcherTest {
     private class Result(val plan: Stitcher.Plan, val images: List<Image>)
 
     /** plan → PNG 렌더링 → ImageIO 디코드까지 전체 경로를 거친다. */
-    private fun stitch(frames: List<IntArray>, topInset: Int = 0, bottomInset: Int = 0): Result {
-        val plan = Stitcher.plan(frames.map { Image(w, h, it).toFrame() }, topInset, bottomInset)
+    private fun stitch(frames: List<IntArray>, topInset: Int = 0, bottomInset: Int = 0, hints: List<Int?> = emptyList()): Result {
+        val plan = Stitcher.plan(frames.map { Image(w, h, it).toFrame() }, topInset, bottomInset, hints)
         val images = plan.parts.map { part ->
             val bytes = ByteArrayOutputStream()
             renderPart(part, bytes) { i, into -> frames[i].copyInto(into) }
@@ -170,8 +252,25 @@ class StitcherTest {
         return Image(w, px.size / w, px)
     }
 
-    private fun frame(offset: Int, clock: Int = 0): IntArray =
-        compose(listOf(if (clock == 0) header else header(clock), content.copyRows(offset, offset + viewH), footer))
+    private fun frame(offset: Int, clock: Int = 0): IntArray = frameOf(content, offset, clock)
+
+    private fun frameOf(source: IntArray, offset: Int, clock: Int = 0): IntArray =
+        compose(listOf(if (clock == 0) header else header(clock), source.copyRows(offset, offset + viewH), footer))
+
+    private fun expectedOf(source: IntArray, first: Int, last: Int): Image {
+        val px = compose(listOf(header, source.copyRows(first, last + viewH), footer))
+        return Image(w, px.size / w, px)
+    }
+
+    /** 오프셋 목록 → 프레임 사이 scrollDeltaY 힌트(첫 프레임은 null). */
+    private fun deltas(offsets: List<Int>): List<Int?> = offsets.indices.map { i -> if (i == 0) null else offsets[i] - offsets[i - 1] }
+
+    /** 서로 다른 37개 행이 계속 반복되는 콘텐츠(화면 안에서 같은 행이 여러 번 나와 행 비교만으로는 위치를 못 찾음). */
+    private fun periodicContent(height: Int, period: Int, seed: Long): IntArray {
+        val rnd = Random(seed)
+        val block = IntArray(w * period) { 0xFF000000.toInt() or rnd.nextInt(0xFFFFFF) }
+        return IntArray(w * height) { i -> block[i % block.size] }
+    }
 
     private fun assertImage(expected: Image, actual: Image) {
         assertEquals("폭", expected.width, actual.width)

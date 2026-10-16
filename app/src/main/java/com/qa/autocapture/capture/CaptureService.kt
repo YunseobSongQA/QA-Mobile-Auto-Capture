@@ -26,8 +26,9 @@ import com.qa.autocapture.storage.TextLog
  * 접근성 서비스. 화면 변화를 감지해 스크린샷을 찍고 SessionRecorder 에 넘긴다. 판단 규칙 없이 아래만 한다.
  *
  * - 화면 식별자 = packageName + className (창 ID 별로 처음 본 className)
- * - 화면 변화(창 전환·스크롤·내용 변경·토스트)마다 캡처. 변화가 이어지면 takeScreenshot 최소 간격으로 계속 찍는다.
- * - 변화가 SETTLE_MS 동안 없거나, 계속돼도 MAX_WAIT_MS 가 지나면 최종 화면(_final) 1장 (FinalTimer)
+ * - 세로 스크롤 중에는 개별 캡처를 하지 않고, 스크롤이 멈출 때마다 이어붙일 프레임 1장만 찍는다 (ScrollTimer)
+ * - 스크롤이 아닌 화면 변화(창 전환·내용 변경·토스트)마다 캡처. 변화가 이어지면 takeScreenshot 최소 간격으로 계속 찍는다.
+ * - 그 변화가 SETTLE_MS 동안 없거나, 계속돼도 MAX_WAIT_MS 가 지나면 최종 화면(_final) 1장 (FinalTimer)
  * - 마스터 스위치(Options.captureEnabled)를 끄면 플로팅 버튼을 숨기고 이벤트를 받지 않는다
  * - 캡처 직전 플로팅 버튼을 숨기고 캡처 후 다시 보인다
  * 이벤트 흐름은 DESIGN.md 3장 참고.
@@ -38,6 +39,7 @@ class CaptureService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val finalTimer = FinalTimer()
+    private val scrollTimer = ScrollTimer()
     private lateinit var options: Options
     private var overlay: FloatingButton? = null
     private var recorder: SessionRecorder? = null
@@ -64,15 +66,25 @@ class CaptureService : AccessibilityService() {
     // 캡처 큐 상태
     private var changeWanted = false // 화면 변화 캡처
     private var finalWanted = false // 최종 캡처
+    private var scrollWanted = false // 스크롤이 멈춘 뒤 이어붙일 프레임
     private var finalSegment = 0 // 최종 판단을 내린 화면 구간
     private var capturing = false // 촬영 예약 ~ 결과 수신
     private var inFlight = false // takeScreenshot 호출 ~ 결과 수신
     private var lastShotAt = 0L
     private var finalCheckPending = false
+    private var scrollCheckPending = false
+
+    /** 직전 촬영 이후 세로 스크롤 이동량(scrollDeltaY 합). 0 이 아닌 값이 한 번도 없으면 모르는 것으로 본다. */
+    private var scrollDy = 0
+    private var scrollDyKnown = false
 
     private val finalCheck = Runnable {
         finalCheckPending = false
         checkFinal()
+    }
+    private val scrollCheck = Runnable {
+        scrollCheckPending = false
+        checkScroll()
     }
     private val hideAndShoot = Runnable {
         overlay?.hideForCapture()
@@ -90,10 +102,12 @@ class CaptureService : AccessibilityService() {
         super.onServiceConnected()
         options = Options(this)
         options.listen(optionsListener)
-        overlay = FloatingButton(this, onTap = ::toggleSession, onLongPress = ::openApp)
+        val button = FloatingButton(this, onTap = ::toggleSession, onLongPress = ::openApp)
+        overlay = button
         connected = true
         applyEnabled(options.captureEnabled)
-        SessionRecorder.recoverUnfinished(applicationContext)
+        val (top, bottom) = button.systemBarInsets()
+        SessionRecorder.recoverUnfinished(applicationContext, top, bottom)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -183,27 +197,76 @@ class CaptureService : AccessibilityService() {
     }
 
     private fun onViewScrolled(pkg: String, windowId: Int, dx: Int, dy: Int) {
-        val rec = recorder ?: return
+        if (recorder == null) return
         // 다이얼로그가 닫히고 원래 화면을 스크롤하면 그 화면으로 돌아간다
         val screen = windowScreens[windowId] ?: current?.takeIf { it.packageName == pkg } ?: return
         switchTo(screen)
-        if (dy != 0 || dx == 0) rec.onScrolled() // 가로로만 스크롤한 경우는 긴 이미지 대상이 아님
-        onChange()
+        if (dy == 0 && dx != 0) {
+            onChange() // 가로로만 스크롤(배너·탭 넘기기)은 이어붙일 수 없으므로 일반 화면 변화로 본다
+            return
+        }
+        if (dy != 0) {
+            scrollDy += dy
+            scrollDyKnown = true
+        }
+        if (!scrollTimer.active) {
+            // 이어붙이기 모드: 스크롤 중의 변화 캡처·최종 캡처는 하지 않는다
+            debug("#SCROLL", "start")
+            finalTimer.cancel()
+            handler.removeCallbacks(finalCheck)
+            finalCheckPending = false
+            changeWanted = false
+            finalWanted = false
+        }
+        scrollTimer.onScroll(SystemClock.uptimeMillis())
+        if (!scrollCheckPending) checkScroll()
     }
 
     private fun switchTo(screen: Screen) {
         if (screen == current) return
         current = screen
-        // 최종 캡처는 화면마다 따로 잰다
+        // 최종 캡처와 이어붙이기는 화면마다 따로 한다(이어붙이던 이미지는 recorder 가 저장)
         finalTimer.cancel()
         finalWanted = false
+        resetScroll()
         recorder?.enterScreen(screen.packageName, screen.className)
+    }
+
+    private fun resetScroll() {
+        scrollTimer.cancel()
+        handler.removeCallbacks(scrollCheck)
+        scrollCheckPending = false
+        scrollWanted = false
+        scrollDy = 0
+        scrollDyKnown = false
+    }
+
+    /** 스크롤이 멈췄는지 판단한다. 멈췄으면 이어붙일 프레임 1장을 요청한다. */
+    private fun checkScroll() {
+        if (recorder == null) return
+        when (val d = scrollTimer.evaluate(SystemClock.uptimeMillis(), CaptureConfig.SCROLL_SETTLE_MS, CaptureConfig.SCROLL_MAX_WAIT_MS)) {
+            is ScrollTimer.Decision.Wait -> {
+                scrollCheckPending = true
+                handler.postAtTime(scrollCheck, d.at)
+            }
+            ScrollTimer.Decision.Capture -> {
+                debug("#SCROLL", "stop dy=${if (scrollDyKnown) scrollDy else "?"}")
+                scrollWanted = true
+                pumpCapture()
+            }
+            ScrollTimer.Decision.Idle -> Unit
+        }
     }
 
     // ── 화면 변화 → 캡처 ─────────────────────────────────────────
 
     private fun onChange() {
         if (recorder == null || current == null) return
+        if (scrollTimer.active) {
+            // 스크롤 중 내용 변경(새 항목 그리기 등)은 스크롤의 일부: 멈춤 대기만 늘린다
+            scrollTimer.onActivity(SystemClock.uptimeMillis())
+            return
+        }
         finalTimer.onChange(SystemClock.uptimeMillis())
         changeWanted = true
         pumpCapture()
@@ -237,6 +300,7 @@ class CaptureService : AccessibilityService() {
         finalCheckPending = false
         changeWanted = false
         finalWanted = false
+        resetScroll()
         handler.removeCallbacks(pump)
         if (capturing && !inFlight) {
             handler.removeCallbacks(hideAndShoot)
@@ -250,7 +314,7 @@ class CaptureService : AccessibilityService() {
     /** 찍을 것이 있으면 최소 간격에 맞춰 1장 예약한다. 예약 뒤 들어온 변화는 그 1장에 함께 담긴다. */
     private fun pumpCapture() {
         val rec = recorder ?: return
-        if (capturing || (!changeWanted && !finalWanted)) return
+        if (capturing || !anyWanted()) return
         if (rec.busy) {
             // 저장이 밀리면 버퍼가 쌓이지 않게 잠시 미룬다
             handler.removeCallbacks(pump)
@@ -266,26 +330,45 @@ class CaptureService : AccessibilityService() {
         handler.postAtTime(hideAndShoot, hideAt)
     }
 
+    private fun anyWanted() = changeWanted || finalWanted || scrollWanted
+
     private fun takeShot() {
         val rec = recorder
-        if (rec == null || (!changeWanted && !finalWanted)) {
+        if (rec == null || !anyWanted() || scrollTimer.active) {
+            // 스크롤이 다시 시작됐으면 멈출 때 다시 요청된다(스크롤 중에는 찍지 않음)
+            if (scrollTimer.active) scrollWanted = false
             finishShot()
             return
         }
-        // 최종 판단 뒤 화면이 바뀌었으면 그 화면의 변화 캡처로 저장한다
-        val final = finalWanted && finalSegment == rec.currentSegment
+        val kind = when {
+            scrollWanted -> SessionRecorder.Kind.SCROLL
+            // 최종 판단 뒤 화면이 바뀌었으면 그 화면의 변화 캡처로 저장한다
+            finalWanted && finalSegment == rec.currentSegment -> SessionRecorder.Kind.FINAL
+            else -> SessionRecorder.Kind.CHANGE
+        }
+        scrollWanted = false
         changeWanted = false
         finalWanted = false
+        // 직전 촬영 이후 스크롤 이동량을 이 촬영에 넘기고 다시 잰다
+        val dy = if (scrollDyKnown) scrollDy else null
+        scrollDy = 0
+        scrollDyKnown = false
+        val segment = rec.currentSegment
         inFlight = true
         lastShotAt = SystemClock.uptimeMillis()
-        debug("#SHOT", if (final) "final" else "change")
+        debug("#SHOT", kind.name.lowercase())
         takeScreenshot(
             Display.DEFAULT_DISPLAY,
             mainExecutor,
             object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
                     finishShot()
-                    if (recorder === rec) rec.addCapture(result.hardwareBuffer, result.colorSpace, final) else result.hardwareBuffer.close()
+                    when {
+                        recorder !== rec -> result.hardwareBuffer.close()
+                        // 화면이 바뀐 뒤 도착한 스크롤 프레임은 이전 화면 것이므로 버린다
+                        kind == SessionRecorder.Kind.SCROLL && segment != rec.currentSegment -> result.hardwareBuffer.close()
+                        else -> rec.addCapture(result.hardwareBuffer, result.colorSpace, kind, dy)
+                    }
                     pumpCapture()
                 }
 
@@ -294,7 +377,15 @@ class CaptureService : AccessibilityService() {
                     Log.w(TAG, "takeScreenshot 실패: $errorCode")
                     debug("#SHOT_FAIL", "code=$errorCode")
                     if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT && recorder === rec) {
-                        if (final) finalWanted = true else changeWanted = true
+                        when (kind) {
+                            SessionRecorder.Kind.SCROLL -> scrollWanted = true
+                            SessionRecorder.Kind.FINAL -> finalWanted = true
+                            SessionRecorder.Kind.CHANGE -> changeWanted = true
+                        }
+                    }
+                    if (dy != null) {
+                        scrollDy += dy
+                        scrollDyKnown = true
                     }
                     pumpCapture()
                 }
@@ -334,7 +425,7 @@ class CaptureService : AccessibilityService() {
         log.write(System.currentTimeMillis(), type, e.packageName, e.className, eventText(e).take(MAX_LOG_TEXT), extra)
     }
 
-    /** 서비스 내부 판단(촬영, 최종 캡처, 실패)을 디버그 로그에 남긴다. */
+    /** 서비스 내부 판단(촬영, 최종 캡처, 스크롤 시작·멈춤, 실패)을 디버그 로그에 남긴다. */
     private fun debug(tag: String, message: String) {
         debugLog?.write(System.currentTimeMillis(), tag, current?.packageName, current?.className, message)
     }

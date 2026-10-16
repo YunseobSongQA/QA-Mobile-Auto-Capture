@@ -1,30 +1,16 @@
 package com.qa.autocapture.stitch
 
+import com.qa.autocapture.capture.CaptureConfig
+import kotlin.math.abs
+
 /**
- * 한 화면 구간에서 찍은 프레임들을 세로로 이어붙이는 "합성 계획"을 만든다.
+ * 스크롤이 멈출 때마다 찍은 프레임들을 세로로 이어붙이는 "합성 계획"을 만든다.
  *
  * 픽셀 대신 행 해시만 보고 판단하므로 프레임 원본을 메모리에 들고 있을 필요가 없다.
  * Android 의존성이 없어 JVM 단위 테스트로 검증한다. 알고리즘 설명은 DESIGN.md 4장.
+ * 상수(겹침 판정 기준, 최대 높이)는 CaptureConfig 에 있다.
  */
 object Stitcher {
-
-    /** 오른쪽 스크롤바 자리는 행 비교에서 뺀다(폭 대비 비율). */
-    const val EDGE_MARGIN_RATIO = 0.03
-
-    /** 행 해시를 만들 때 가로 샘플링 간격(px). */
-    const val SAMPLE_STEP = 2
-
-    /** 오프셋으로 인정하기 위한 최소 득표 수. */
-    const val MIN_VOTES = 10
-
-    /** 겹치는 구간에서 정적이 아닌 행 중 맞아야 하는 최소 비율. */
-    const val MIN_MATCH_RATIO = 0.5
-
-    /** 오프셋을 못 찾았어도 바뀐 행이 이 비율 이하이면 같은 위치(시계·커서 변화)로 보고 버린다. */
-    const val SAME_MAX_CHANGED_RATIO = 0.15
-
-    /** 결과 1장의 최대 높이. 넘으면 프레임 경계에서 다음 part 로 나눈다. */
-    const val MAX_PART_HEIGHT = 30_000
 
     private const val FNV_OFFSET = -0x340d631b7bdddcdbL // 0xcbf29ce484222325
     private const val FNV_PRIME = 0x100000001b3L
@@ -71,7 +57,7 @@ object Stitcher {
 
     /** ARGB 픽셀 배열에서 행마다 64bit 해시를 만든다(오른쪽 여백 제외, 가로 샘플링). */
     fun rowHashes(pixels: IntArray, width: Int, height: Int): LongArray {
-        val xEnd = width - (width * EDGE_MARGIN_RATIO).toInt()
+        val xEnd = width - (width * CaptureConfig.STITCH_EDGE_MARGIN_RATIO).toInt()
         val out = LongArray(height)
         for (y in 0 until height) {
             var h = FNV_OFFSET
@@ -80,7 +66,7 @@ object Stitcher {
             val end = start + xEnd
             while (i < end) {
                 h = (h xor (pixels[i].toLong() and 0xFFFFFFFFL)) * FNV_PRIME
-                i += SAMPLE_STEP
+                i += CaptureConfig.STITCH_SAMPLE_STEP
             }
             out[y] = h
         }
@@ -90,12 +76,20 @@ object Stitcher {
     /**
      * 직전에 채택된 프레임 [a] 와 새 프레임 [b] 의 관계를 찾는다.
      *
-     * 정적이 아니고(같은 위치 행과 다름) 프레임 안에서 유일한 B 의 행이,
-     * A 에서 유일하게 나타나는 위치와의 차이(dy)에 투표한다.
+     * 1) [expected](scrollDeltaY 로 아는 이동량)가 있으면 그 위치에서 행이 맞는지 검증해 맞으면 그대로 쓴다.
+     * 2) 없거나 안 맞으면 행 비교: 정적이 아니고(같은 위치 행과 다름) 프레임 안에서 유일한 B 의 행이,
+     *    A 에서 유일하게 나타나는 위치와의 차이(dy)에 투표한다.
      */
-    fun match(a: LongArray, b: LongArray): Match {
+    fun match(a: LongArray, b: LongArray, expected: Int? = null): Match {
         val h = a.size
         if (a.contentEquals(b)) return Match.Same
+
+        if (expected != null && expected != 0 && abs(expected) < h) {
+            val (ok, total) = overlapMatch(a, b, expected)
+            if (total >= CaptureConfig.STITCH_MIN_VOTES && ok >= total * CaptureConfig.STITCH_HINT_MIN_MATCH_RATIO) {
+                return Match.Offset(expected)
+            }
+        }
 
         val uniqueA = HashMap<Long, Int>(h * 2)
         for (y in 0 until h) uniqueA[a[y]] = if (uniqueA.containsKey(a[y])) -1 else y
@@ -116,18 +110,19 @@ object Stitcher {
         var second = 0
         for (i in votes.indices) if (i != best && votes[i] > second) second = votes[i]
 
-        if (votes[best] >= MIN_VOTES && votes[best] >= 2 * second) {
+        if (votes[best] >= CaptureConfig.STITCH_MIN_VOTES && votes[best] >= 2 * second) {
             val dy = best - (h - 1)
-            if (overlapMatchRatio(a, b, dy) >= MIN_MATCH_RATIO) return Match.Offset(dy)
+            val (ok, total) = overlapMatch(a, b, dy)
+            if (total == 0 || ok >= total * CaptureConfig.STITCH_MIN_MATCH_RATIO) return Match.Offset(dy)
         }
 
         var changed = 0
         for (y in 0 until h) if (a[y] != b[y]) changed++
-        return if (changed <= h * SAME_MAX_CHANGED_RATIO) Match.Same else Match.NoMatch
+        return if (changed <= h * CaptureConfig.STITCH_SAME_MAX_CHANGED_RATIO) Match.Same else Match.NoMatch
     }
 
-    /** 겹치는 구간에서 양쪽 모두 정적이 아닌 행 중 dy 만큼 옮겼을 때 일치하는 비율. */
-    private fun overlapMatchRatio(a: LongArray, b: LongArray, dy: Int): Double {
+    /** 겹치는 구간에서 양쪽 모두 정적이 아닌 행 중 dy 만큼 옮겼을 때 일치하는 행 수와 비교한 행 수. */
+    private fun overlapMatch(a: LongArray, b: LongArray, dy: Int): Pair<Int, Int> {
         val h = a.size
         var total = 0
         var ok = 0
@@ -137,7 +132,7 @@ object Stitcher {
             total++
             if (b[y] == a[y + dy]) ok++
         }
-        return if (total == 0) 1.0 else ok.toDouble() / total
+        return ok to total
     }
 
     /**
@@ -145,18 +140,30 @@ object Stitcher {
      *
      * @param topInset 상태바 높이. 상단 고정 영역의 최소값으로 쓴다.
      * @param bottomInset 내비게이션바 높이. 하단 고정 영역의 최소값으로 쓴다.
+     * @param hints hints[i] = 프레임 i-1 → i 사이 scrollDeltaY 합(아래로 스크롤이면 +). 모르면 null. hints[0] 은 쓰지 않는다.
+     * @param maxHeight 결과 1장의 최대 높이. 넘으면 프레임 경계에서 다음 part 로 나눈다.
      */
-    fun plan(frames: List<Frame>, topInset: Int = 0, bottomInset: Int = 0): Plan {
+    fun plan(
+        frames: List<Frame>,
+        topInset: Int = 0,
+        bottomInset: Int = 0,
+        hints: List<Int?> = emptyList(),
+        maxHeight: Int = CaptureConfig.MAX_STITCH_HEIGHT,
+    ): Plan {
         require(frames.isNotEmpty()) { "프레임이 없습니다" }
 
         val groups = mutableListOf<List<Placed>>()
         var group = mutableListOf(Placed(0, 0))
         var last = 0
         var lastPos = 0
+        // 직전 채택 프레임부터의 이동량. 버린 프레임(Same)의 이동량도 더한다. 하나라도 모르면 null.
+        var expected: Int? = 0
         for (i in 1 until frames.size) {
             val a = frames[last]
             val b = frames[i]
-            val m = if (a.width != b.width || a.height != b.height) Match.NoMatch else match(a.rows, b.rows)
+            val hint = hints.getOrNull(i)
+            expected = if (expected != null && hint != null) expected + hint else null
+            val m = if (a.width != b.width || a.height != b.height) Match.NoMatch else match(a.rows, b.rows, expected)
             when (m) {
                 Match.Same -> continue
                 Match.NoMatch -> {
@@ -168,7 +175,7 @@ object Stitcher {
                     val pos = lastPos + m.dy
                     val top = minOf(group.minOf { it.pos }, pos)
                     val bottom = maxOf(group.maxOf { it.pos }, pos) + b.height
-                    if (bottom - top > MAX_PART_HEIGHT) {
+                    if (bottom - top > maxHeight) {
                         groups += group
                         group = mutableListOf(Placed(i, 0))
                         lastPos = 0
@@ -179,6 +186,7 @@ object Stitcher {
                 }
             }
             last = i
+            expected = 0
         }
         groups += group
 
@@ -195,25 +203,8 @@ object Stitcher {
 
         val rows = group.map { frames[it.frame].rows }
 
-        // (1) 고정 영역: 연속 프레임에서 위/아래부터 같은 위치 행이 동일한 길이의 최소값
-        var minTop = h
-        var minBottom = h
-        for (k in 1 until group.size) {
-            val a = rows[k - 1]
-            val b = rows[k]
-            var t = 0
-            while (t < h && a[t] == b[t]) t++
-            var bt = 0
-            while (bt < h && a[h - 1 - bt] == b[h - 1 - bt]) bt++
-            minTop = minOf(minTop, t)
-            minBottom = minOf(minBottom, bt)
-        }
-        var fixedTop = maxOf(topInset, minTop)
-        var fixedBottom = maxOf(bottomInset, minBottom)
-        if (fixedTop + fixedBottom >= h) {
-            fixedTop = topInset.coerceIn(0, h / 3)
-            fixedBottom = bottomInset.coerceIn(0, h / 3)
-        }
+        // (1) 고정 영역(헤더·탭바): 결과에는 맨 위·맨 아래에 한 번씩만 넣고 나머지 프레임에서는 잘라낸다
+        val (fixedTop, fixedBottom) = fixedArea(rows, topInset, bottomInset)
 
         // (2) 행 분류: 이웃 프레임과 비교
         val cls = Array(group.size) { k ->
@@ -245,6 +236,32 @@ object Stitcher {
         }
         out.add(group[bottomK].frame, h - fixedBottom, h)
         return Part(w, h, out.slices)
+    }
+
+    /**
+     * 상단·하단 고정 영역 높이(헤더·탭바처럼 프레임마다 안 바뀌는 행).
+     * 연속 프레임 쌍마다 위/아래에서부터 같은 위치 행이 동일한 길이를 재서 그 최소값을 쓴다.
+     * 상태바·내비게이션바 높이([topInset], [bottomInset])보다 작으면 그 값을 쓰고,
+     * 위아래 합이 화면을 다 덮으면(움직임 없음) 그 두 값으로 되돌린다.
+     */
+    fun fixedArea(rows: List<LongArray>, topInset: Int = 0, bottomInset: Int = 0): Pair<Int, Int> {
+        val h = rows.first().size
+        var minTop = h
+        var minBottom = h
+        for (k in 1 until rows.size) {
+            val a = rows[k - 1]
+            val b = rows[k]
+            var t = 0
+            while (t < h && a[t] == b[t]) t++
+            var bt = 0
+            while (bt < h && a[h - 1 - bt] == b[h - 1 - bt]) bt++
+            minTop = minOf(minTop, t)
+            minBottom = minOf(minBottom, bt)
+        }
+        val top = maxOf(topInset, minTop)
+        val bottom = maxOf(bottomInset, minBottom)
+        if (top + bottom >= h) return topInset.coerceIn(0, h / 3) to bottomInset.coerceIn(0, h / 3)
+        return top to bottom
     }
 
     /**
