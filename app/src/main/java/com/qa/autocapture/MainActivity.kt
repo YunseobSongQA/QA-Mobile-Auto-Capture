@@ -34,7 +34,7 @@ class MainActivity : Activity() {
     /** 서비스 상태(연결·기록·저장 수)가 바뀌면 호출된다. 기록이 끝나면 세션 목록도 새로 읽는다. */
     private val stateListener: () -> Unit = {
         status.refresh()
-        val recording = CaptureStatus.recordingImages != null
+        val recording = CaptureStatus.recordingScreens != null
         if (wasRecording != recording) sessions.refresh()
         wasRecording = recording
     }
@@ -81,7 +81,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        wasRecording = CaptureStatus.recordingImages != null
+        wasRecording = CaptureStatus.recordingScreens != null
         status.refresh()
         setup.refresh()
         sessions.refresh()

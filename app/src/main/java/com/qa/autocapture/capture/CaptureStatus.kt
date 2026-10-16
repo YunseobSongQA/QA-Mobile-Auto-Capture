@@ -14,8 +14,8 @@ object CaptureStatus {
     var connected = false
         internal set
 
-    /** 기록 중이면 확보한 이미지 수, 아니면 null. */
-    var recordingImages: Int? = null
+    /** 기록 중이면 사진을 찍은 화면 수, 아니면 null. */
+    var recordingScreens: Int? = null
         internal set
 
     private val listeners = LinkedHashSet<() -> Unit>()

@@ -4,26 +4,21 @@ import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.SystemClock
-import com.qa.autocapture.capture.ScreenshotTaker.Purpose
-import com.qa.autocapture.capture.policy.CaptureConfig
-import com.qa.autocapture.capture.policy.FrameDiff
-import com.qa.autocapture.capture.policy.ScrollTimer
-import com.qa.autocapture.capture.policy.SettleCycle
+import com.qa.autocapture.capture.ScreenshotTaker.Kind
 import com.qa.autocapture.overlay.FloatingButton
 import com.qa.autocapture.session.SessionRecorder
 import com.qa.autocapture.storage.Options
+import kotlin.math.abs
 
 /**
- * 찍을 때 판단. 기록 중인 화면의 이벤트를 받아 언제 무엇을 찍을지 정하고, 확정한 화면을 SessionRecorder 에 넘긴다.
+ * 찍을 때 판단(첫 버전 방식). 기록 중인 화면의 이벤트를 받아 찍고, 찍은 화면을 SessionRecorder 에 넘긴다.
  * 메인 스레드 전용.
  *
- * - 찍는 때(중요한 때만): 화면 진입, 터치·길게 누르기·입력, 스크롤 멈춤.
- *   앱이 스스로 바뀐 것(배너, 시계, 애니메이션)은 화면 대부분이 바뀌었을 때만.
- * - 찍는 화면: 정적으로 완성된 화면(SettleCycle). 토스트가 떠 있거나 로딩 표시가 돌면 미룬다(깔끔한 화면만).
- * - 스크롤: 스크롤하는 동안 플로팅 버튼을 숨겨 두고, 일정 거리마다·멈출 때마다 1장(ScrollTimer)을 같은 상태에 덧붙인다
- *   → 화면 상태가 끝나면 한 장으로 이어붙는다.
- * - 화면 상태: 작은 변화는 그 상태 이미지를 최신 화면으로 바꾸고, 뚜렷이 바뀌면 새 이미지([deliver]).
- * 판단 규칙은 DESIGN.md 3장.
+ * - 화면 진입: 창 이벤트가 ENTRY_SETTLE_MS(0.5초) 동안 잠잠해지면 1장.
+ *   토스트가 떠 있거나 로딩 표시가 돌면 사라질 때까지 미룬다(깔끔한 사진, 최대 ENTRY_MAX_WAIT_MS).
+ * - 스크롤: 멈춘 지 SCROLL_DEBOUNCE_MS(0.3초) 뒤 1장. 멈추지 않고 길게 스크롤하면 화면 높이 절반마다 1장(겹침 유지).
+ *   스크롤하는 동안 플로팅 버튼은 숨겨 둔다(깜빡임 없음).
+ * - 같은 화면 방문에서 찍은 사진은 화면을 떠날 때 겹치는 부분끼리 이어붙여 1장이 된다(SessionRecorder → GroupSaver).
  */
 class CaptureController(
     private val handler: Handler,
@@ -36,10 +31,6 @@ class CaptureController(
 ) : ScreenshotTaker.Callback {
 
     private val taker = ScreenshotTaker(service, handler, overlay, this)
-    private val cycle = SettleCycle()
-    private val scrollTimer = ScrollTimer()
-
-    /** 스크롤 중간 프레임을 찍을 이동량(px). */
     private val scrollStepPx = (service.resources.displayMetrics.heightPixels * CaptureConfig.SCROLL_STEP_RATIO).toInt()
 
     private var recorder: SessionRecorder? = null
@@ -48,45 +39,42 @@ class CaptureController(
     var current: Screen? = null
         private set
 
-    /** 이 화면 방문에서 마지막으로 확보한 화면(비교 기준)과, 그것이 진입 직후 미리 확보한 임시 화면인지. */
-    private var lastThumb: FrameDiff.Thumb? = null
-    private var lastIsPreview = false
+    // 화면 진입 사진
+    private var entryPending = false
+    private var entryDeadline = 0L
 
-    /** 마지막으로 확보한 화면 이후 세로 스크롤 이동량(scrollDeltaY 합). 0 이 아닌 값이 없으면 모르는 것으로 본다. */
+    // 스크롤
+    private var scrolling = false
+    private var scrollAccum = 0
+    private var lastStepAt = 0L
+
+    /** 마지막으로 찍은 사진 이후 세로 스크롤 이동량(scrollDeltaY 합). 이동량을 모르는 이벤트가 섞이면 모르는 것으로 본다. */
     private var scrollDy = 0
-    private var scrollDyKnown = false
+    private var scrollDyKnown = true
 
-    /** 마지막 토스트가 뜬 시각과, 화면에서 사라졌다고 볼 시각(uptime). */
+    // 토스트
     private var toastShownAt = 0L
     private var toastUntil = 0L
 
-    private var cycleCheckPending = false
-    private var scrollCheckPending = false
-    private var changeCooldownUntil = 0L
-
-    private val cycleCheck = Runnable {
-        cycleCheckPending = false
-        checkCycle()
-    }
-    private val scrollCheck = Runnable {
-        scrollCheckPending = false
-        checkScroll()
+    private val entryCapture = Runnable { tryEntryCapture() }
+    private val scrollStopped = Runnable {
+        scrolling = false
+        scrollAccum = 0
+        debug("#SCROLL", "stop")
+        request(Kind.SCROLL_STOP)
     }
 
     // ── 세션 ────────────────────────────────────────────────────
 
-    fun start(recorder: SessionRecorder, topInset: Int, bottomInset: Int) {
+    fun start(recorder: SessionRecorder) {
         this.recorder = recorder
         current = null
-        taker.setInsets(topInset, bottomInset)
     }
 
     fun stop() {
         cancelPending()
         recorder = null
         current = null
-        lastThumb = null
-        lastIsPreview = false
     }
 
     fun shutdown() {
@@ -96,180 +84,121 @@ class CaptureController(
 
     // ── 이벤트 ──────────────────────────────────────────────────
 
-    /** 화면 진입(또는 다른 화면에서 돌아옴). 새 방문을 열고 완성되면 1장. */
-    fun switchTo(screen: Screen) {
-        val rec = recorder ?: return
-        current = screen
-        stopCycle()
-        resetScroll()
-        lastThumb = null
-        lastIsPreview = false
-        rec.enterScreen(screen.packageName, screen.className)
-        startCycle(SettleCycle.Kind.ACTION, preview = true)
+    /** 창 전환(화면 진입이거나 같은 화면의 창 변경). 창 이벤트가 잠잠해지면 1장. */
+    fun onWindowState(screen: Screen) {
+        if (recorder == null) return
+        switchTo(screen)
+        scheduleEntry()
     }
 
-    /** 터치·입력: 화면이 바뀌었으면 완성된 뒤 찍는다. */
-    fun onAction() {
-        if (recorder == null || current == null) return
-        if (scrollTimer.active) {
-            scrollTimer.onActivity(SystemClock.uptimeMillis())
-            return
-        }
-        startCycle(SettleCycle.Kind.ACTION)
-    }
-
-    /** 내용 변경: 확인 중이면 아직 바뀌는 중이라는 뜻, 아니면 앱이 스스로 바뀐 것(큰 변화일 때만 찍음). */
-    fun onContentChanged() {
-        if (recorder == null || current == null) return
-        val now = SystemClock.uptimeMillis()
-        when {
-            scrollTimer.active -> scrollTimer.onActivity(now)
-            cycle.active -> {
-                cycle.onActivity(now)
-                // 대기 중인 판단이 있으면 그때 마지막 변화 시각으로 다시 잰다(이벤트마다 타이머를 다시 걸지 않음)
-                if (!cycleCheckPending) checkCycle()
-            }
-            now >= changeCooldownUntil -> startCycle(SettleCycle.Kind.CHANGE)
-        }
-    }
-
-    /** 스크롤 이벤트. [screen] = 스크롤한 창의 화면. */
+    /**
+     * 스크롤 이벤트. [screen] = 스크롤한 창의 화면, [dx]·[dy] = scrollDeltaX/Y(모르면 -1).
+     * 가로로만 스크롤(배너·탭 넘기기)은 이어붙일 수 없으므로 무시한다.
+     */
     fun onScroll(screen: Screen, dx: Int, dy: Int) {
         if (recorder == null) return
+        val unknown = dy == UNDEFINED_DELTA
+        if (!unknown && dy == 0 && dx != 0) return
         // 다이얼로그가 닫히고 원래 화면을 스크롤하면 그 화면으로 돌아간다
-        if (screen != current) switchTo(screen)
-        if (dy == 0 && dx != 0) {
-            onContentChanged() // 가로로만 스크롤(배너·탭 넘기기)은 이어붙일 수 없으므로 화면 변화로 본다
-            return
-        }
-        if (dy != 0) {
-            scrollDy += dy
-            scrollDyKnown = true
-        }
-        if (!scrollTimer.active) {
-            // 스크롤 중에는 정지 확인을 멈추고, 버튼을 숨겨 둔 채(깜빡임 없음) 중간·멈춘 화면만 찍는다
-            debug("#SCROLL", "start")
-            stopCycle()
+        switchTo(screen)
+        val now = SystemClock.uptimeMillis()
+        if (!scrolling) {
+            scrolling = true
+            lastStepAt = now
             overlay.hide(FloatingButton.Hide.SCROLL)
+            debug("#SCROLL", "start")
         }
-        scrollTimer.onScroll(SystemClock.uptimeMillis(), if (dy != 0) dy else null)
-        checkScroll() // 이동량이 쌓였으면 바로 중간 프레임
+        if (unknown) {
+            scrollDyKnown = false
+            if (now - lastStepAt >= CaptureConfig.SCROLL_STEP_MS) step(now)
+        } else {
+            scrollDy += dy
+            scrollAccum += abs(dy)
+            if (scrollAccum >= scrollStepPx) step(now)
+        }
+        handler.removeCallbacks(scrollStopped)
+        handler.postDelayed(scrollStopped, CaptureConfig.SCROLL_DEBOUNCE_MS)
     }
 
-    /** 토스트: 문구는 기록하고, 떠 있는 동안(TOAST_VISIBLE_MS)은 찍지 않는다. */
+    /** 토스트: 문구는 기록하고, 떠 있는 동안(TOAST_VISIBLE_MS)은 화면 진입 사진을 미룬다. */
     fun onToast(pkg: String, text: String) {
         val rec = recorder ?: return
         rec.logToast(System.currentTimeMillis(), pkg, text, current?.className)
         val now = SystemClock.uptimeMillis()
         toastShownAt = now
         toastUntil = now + CaptureConfig.TOAST_VISIBLE_MS
-        if (cycle.active) cycle.postpone(toastUntil)
-        onContentChanged()
     }
 
-    /** [at] 에 찍은 화면에 토스트가 들어 있을 수 있는가. */
-    private fun toastVisibleAt(at: Long) =
-        toastShownAt != 0L && at >= toastShownAt - CaptureConfig.TOAST_EVENT_SLACK_MS && at < toastUntil
-
-    /** 사용자가 홈·이 앱으로 떠났다. 기다리던 촬영을 모두 버린다(떠난 뒤 화면이 찍히지 않게). */
+    /** 사용자가 홈·이 앱으로 떠났거나 화면이 바뀌었다. 기다리던 촬영을 모두 버린다. */
     fun cancelPending() {
-        stopCycle()
-        resetScroll()
+        handler.removeCallbacks(entryCapture)
+        handler.removeCallbacks(scrollStopped)
+        entryPending = false
+        if (scrolling) {
+            scrolling = false
+            overlay.show(FloatingButton.Hide.SCROLL)
+        }
+        scrollAccum = 0
         taker.cancel()
     }
 
     // ── 언제 찍을지 ──────────────────────────────────────────────
 
-    private fun startCycle(kind: SettleCycle.Kind, preview: Boolean = false) {
-        cycle.start(kind, SystemClock.uptimeMillis(), preview)
-        checkCycle()
-    }
-
-    private fun stopCycle() {
-        cycle.cancel()
-        handler.removeCallbacks(cycleCheck)
-        cycleCheckPending = false
-        if (taker.wanted?.purpose != Purpose.SCROLL) taker.drop()
-    }
-
-    private fun resetScroll() {
-        scrollTimer.cancel()
-        handler.removeCallbacks(scrollCheck)
-        scrollCheckPending = false
-        taker.drop(Purpose.SCROLL)
+    private fun switchTo(screen: Screen) {
+        if (screen == current) return
+        current = screen
+        cancelPending()
         scrollDy = 0
-        scrollDyKnown = false
-        overlay.show(FloatingButton.Hide.SCROLL)
+        scrollDyKnown = true
+        recorder?.enterScreen(screen.packageName, screen.className)
     }
 
-    private fun checkCycle() {
-        handler.removeCallbacks(cycleCheck)
-        cycleCheckPending = false
-        if (recorder == null) return
+    /** 창 이벤트가 잠잠해지면 진입 사진. 창 이벤트가 계속 와도 ENTRY_MAX_WAIT_MS 를 넘기지 않는다. */
+    private fun scheduleEntry() {
         val now = SystemClock.uptimeMillis()
-        when (val d = cycle.evaluate(now, options.settleMs, CaptureConfig.CONFIRM_MS, options.maxWaitMs)) {
-            is SettleCycle.Decision.Wait -> {
-                cycleCheckPending = true
-                handler.postAtTime(cycleCheck, d.at)
-            }
-            is SettleCycle.Decision.Take -> {
-                // 깔끔한 화면만: 토스트가 떠 있으면 사라질 때까지, 로딩 표시가 돌면 멈출 때까지 미룬다.
-                // 끝내 로딩이 안 끝나면(MAX_WAIT 강제 촬영) 그 화면도 증적으로 남긴다.
-                val blockedUntil = when {
-                    now < toastUntil -> toastUntil
-                    d.shot != SettleCycle.Shot.PROBE && !d.forced && isLoading() -> now + CaptureConfig.LOADING_RECHECK_MS
-                    else -> 0L
-                }
-                if (blockedUntil > 0L) {
-                    debug("#WAIT", if (now < toastUntil) "toast" else "loading")
-                    cycle.postpone(blockedUntil, d.shot)
-                    checkCycle()
-                    return
-                }
-                val purpose = when (d.shot) {
-                    SettleCycle.Shot.PREVIEW -> Purpose.PREVIEW
-                    SettleCycle.Shot.PROBE -> Purpose.PROBE
-                    SettleCycle.Shot.FINAL -> Purpose.FINAL
-                }
-                want(ScreenshotTaker.Request(purpose, d.generation))
-            }
-            SettleCycle.Decision.Idle -> Unit
+        if (!entryPending) {
+            entryPending = true
+            entryDeadline = now + CaptureConfig.ENTRY_MAX_WAIT_MS
         }
+        handler.removeCallbacks(entryCapture)
+        handler.postAtTime(entryCapture, minOf(now + options.settleMs, entryDeadline))
     }
 
-    /** 스크롤 중간 프레임을 찍을 때인지, 스크롤이 멈췄는지 판단한다. 그때마다 이어붙일 프레임 1장을 요청한다. */
-    private fun checkScroll() {
-        handler.removeCallbacks(scrollCheck)
-        scrollCheckPending = false
-        if (recorder == null) return
+    /** 진입 사진: 토스트가 떠 있거나 로딩 표시가 돌면 사라질 때까지 미룬다(최대 entryDeadline). */
+    private fun tryEntryCapture() {
         val now = SystemClock.uptimeMillis()
-        when (val d = scrollTimer.evaluate(now, CaptureConfig.SCROLL_SETTLE_MS, CaptureConfig.SCROLL_MAX_WAIT_MS, scrollStepPx, CaptureConfig.SCROLL_STEP_MS)) {
-            is ScrollTimer.Decision.Wait -> {
-                scrollCheckPending = true
-                handler.postAtTime(scrollCheck, d.at)
+        if (now < entryDeadline) {
+            if (now < toastUntil) {
+                debug("#WAIT", "toast")
+                handler.postAtTime(entryCapture, minOf(toastUntil, entryDeadline))
+                return
             }
-            ScrollTimer.Decision.Step -> {
-                debug("#SCROLL", "step dy=${if (scrollDyKnown) scrollDy else "?"}")
-                want(ScreenshotTaker.Request(Purpose.SCROLL, 0, step = true))
-                checkScroll() // 멈춤 판단 타이머
+            if (isLoading()) {
+                debug("#WAIT", "loading")
+                handler.postAtTime(entryCapture, minOf(now + CaptureConfig.LOADING_RECHECK_MS, entryDeadline))
+                return
             }
-            ScrollTimer.Decision.Capture -> {
-                debug("#SCROLL", "stop dy=${if (scrollDyKnown) scrollDy else "?"}")
-                want(ScreenshotTaker.Request(Purpose.SCROLL, 0))
-            }
-            ScrollTimer.Decision.Idle -> Unit
         }
+        entryPending = false
+        request(Kind.ENTRY)
     }
 
-    private fun want(request: ScreenshotTaker.Request) {
-        if (taker.wanted?.purpose == Purpose.SCROLL && request.purpose != Purpose.SCROLL) {
-            // 스크롤 프레임이 먼저다. 정지 확인은 조금 뒤 다시 판단한다
-            cycle.onShotFailed(request.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
-            checkCycle()
-            return
-        }
-        taker.want(request)
+    /** 길게 스크롤하는 중 1장(프레임끼리 겹치게). */
+    private fun step(now: Long) {
+        scrollAccum = 0
+        lastStepAt = now
+        debug("#SCROLL", "step")
+        request(Kind.SCROLL_STEP)
     }
+
+    private fun request(kind: Kind) {
+        if (recorder == null || current == null) return
+        taker.want(ScreenshotTaker.Request(kind))
+    }
+
+    /** [at] 에 찍은 화면에 토스트가 들어 있을 수 있는가. */
+    private fun toastVisibleAt(at: Long) =
+        toastShownAt != 0L && at >= toastShownAt - CaptureConfig.TOAST_EVENT_SLACK_MS && at < toastUntil
 
     // ── 촬영 결과 (ScreenshotTaker.Callback) ─────────────────────
 
@@ -277,128 +206,49 @@ class CaptureController(
 
     override fun onBeforeShot(request: ScreenshotTaker.Request): Boolean {
         val rec = recorder ?: return false
-        if (request.purpose == Purpose.SCROLL) {
-            // 멈춘 화면인데 스크롤이 다시 시작됐으면 멈출 때 다시 요청된다. 중간 프레임은 스크롤 중일 때만.
-            if (scrollTimer.active != request.step) return false
-            if (request.step) scrollTimer.onStepTaken(SystemClock.uptimeMillis())
-        }
         request.recorder = rec
         request.segment = rec.currentSegment
         request.takenAt = SystemClock.uptimeMillis()
-        if (request.purpose == Purpose.SCROLL) {
-            request.scrollDy = if (scrollDyKnown) scrollDy else null
-            scrollDy = 0
-            scrollDyKnown = false
-        }
-        debug("#SHOT", request.purpose.name.lowercase())
+        request.scrollDy = if (scrollDyKnown) scrollDy else null
+        scrollDy = 0
+        scrollDyKnown = true
+        debug("#SHOT", request.kind.name.lowercase())
         return true
     }
 
     override fun onShotFailed(request: ScreenshotTaker.Request, retrying: Boolean) {
-        request.scrollDy?.let {
-            scrollDy += it
-            scrollDyKnown = true
-        }
-        debug("#SHOT_FAIL", if (retrying) "retry" else request.purpose.name.lowercase())
-        if (retrying || request.recorder !== recorder) return
-        if (request.purpose == Purpose.SCROLL) {
-            if (request.step) {
-                scrollTimer.onStepDropped()
-                checkScroll()
-            } else if (!scrollTimer.active) {
-                overlay.show(FloatingButton.Hide.SCROLL)
-            }
-            return
-        }
-        cycle.onShotFailed(request.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
-        checkCycle()
+        // 못 찍은 사진의 이동량은 다음 사진으로 넘긴다
+        val dy = request.scrollDy
+        if (dy == null) scrollDyKnown = false else scrollDy += dy
+        debug("#SHOT_FAIL", if (retrying) "retry" else request.kind.name.lowercase())
+        if (!retrying && request.kind == Kind.SCROLL_STOP && !scrolling) overlay.show(FloatingButton.Hide.SCROLL)
     }
 
-    override fun onAnalyzed(request: ScreenshotTaker.Request, thumb: FrameDiff.Thumb?, bitmap: Bitmap?, mask: FrameDiff.Box?) {
-        // 멈춘 화면을 찍었으면 버튼을 다시 보인다(그새 다시 스크롤하면 그대로 숨김)
-        if (request.purpose == Purpose.SCROLL && !request.step && !scrollTimer.active) overlay.show(FloatingButton.Hide.SCROLL)
+    override fun onCaptured(request: ScreenshotTaker.Request, bitmap: Bitmap?) {
+        // 스크롤이 멈춘 사진을 찍었으면 버튼을 다시 보인다(그새 다시 스크롤하면 그대로 숨김)
+        if (request.kind == Kind.SCROLL_STOP && !scrolling) overlay.show(FloatingButton.Hide.SCROLL)
         val rec = recorder
-        if (rec == null || request.recorder !== rec || request.segment != rec.currentSegment || thumb == null) {
-            bitmap?.recycle()
-            if (rec != null && thumb == null && request.purpose != Purpose.SCROLL) {
-                cycle.onShotFailed(request.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
-                checkCycle()
-            }
+        if (bitmap == null || rec == null || request.recorder !== rec || request.segment != rec.currentSegment) {
+            bitmap?.recycle() // 그 사이 화면이 바뀜
             return
         }
-        val now = SystemClock.uptimeMillis()
-        if (request.purpose == Purpose.SCROLL) {
-            keep(rec, bitmap ?: return, thumb, SessionRecorder.Op.SCROLL, request.scrollDy)
-            debug("#FRAME", "${if (request.step) "scroll-step" else "scroll"} dy=${request.scrollDy ?: "?"}")
-            // 멈춘 뒤 남은 로딩(이미지 등)이 끝나면 방금 프레임을 완성된 화면으로 바꾼다
-            if (!request.step && !scrollTimer.active) startCycle(SettleCycle.Kind.COMPLETION)
+        if (request.kind == Kind.ENTRY && toastVisibleAt(request.takenAt)) {
+            // 찍는 순간 토스트가 떠 있었다: 버리고 토스트가 사라진 뒤 다시 찍는다
+            bitmap.recycle()
+            debug("#DROP", "toast")
+            entryPending = true
+            entryDeadline = maxOf(entryDeadline, toastUntil)
+            handler.removeCallbacks(entryCapture)
+            handler.postAtTime(entryCapture, toastUntil)
             return
         }
-        val shot = when (request.purpose) {
-            Purpose.PREVIEW -> SettleCycle.Shot.PREVIEW
-            Purpose.PROBE -> SettleCycle.Shot.PROBE
-            else -> SettleCycle.Shot.FINAL
-        }
-        if (toastVisibleAt(request.takenAt)) {
-            // 찍는 순간 토스트가 떠 있었다: 버리고 토스트가 사라진 뒤 다시 확인한다
-            bitmap?.recycle()
-            debug("#DROP", "toast ${request.purpose.name.lowercase()}")
-            cycle.postpone(toastUntil, shot)
-            checkCycle()
-            return
-        }
-        when (val o = cycle.onShot(request.generation, shot, thumb, mask, lastThumb, now, CaptureConfig.CONFIRM_MS)) {
-            SettleCycle.Outcome.Preview -> {
-                if (bitmap != null && lastThumb == null) {
-                    keep(rec, bitmap, thumb, SessionRecorder.Op.NEW, null)
-                    lastIsPreview = true
-                    debug("#FRAME", "preview")
-                } else {
-                    bitmap?.recycle()
-                }
-            }
-            is SettleCycle.Outcome.Accept -> deliver(rec, thumb, bitmap, o.kind, o.forced)
-            is SettleCycle.Outcome.NoChange -> {
-                bitmap?.recycle()
-                if (o.kind == SettleCycle.Kind.CHANGE) changeCooldownUntil = now + CaptureConfig.CHANGE_COOLDOWN_MS
-                debug("#NOCHANGE", o.kind.name.lowercase())
-            }
-            SettleCycle.Outcome.Continue -> bitmap?.recycle()
-        }
-        checkCycle()
-    }
-
-    /** 확정한 화면을 화면 상태에 넣는다: 작은 변화면 마지막 화면을 바꾸고, 뚜렷이 바뀌면 새 이미지. */
-    private fun deliver(rec: SessionRecorder, thumb: FrameDiff.Thumb, bitmap: Bitmap?, kind: SettleCycle.Kind, forced: Boolean) {
-        if (bitmap == null) return
-        val last = lastThumb
-        val op = when {
-            last == null -> SessionRecorder.Op.NEW
-            lastIsPreview -> SessionRecorder.Op.REPLACE // 진입 직후 임시 화면은 완성된 화면으로 바꾼다
-            kind == SettleCycle.Kind.CHANGE -> SessionRecorder.Op.NEW
-            // 스크롤 멈춘 화면의 남은 로딩: 같은 스크롤 위치이므로 그 프레임을 완성된 화면으로 바꾼다(이어붙임 유지)
-            kind == SettleCycle.Kind.COMPLETION -> SessionRecorder.Op.REPLACE
-            FrameDiff.similar(last, thumb) -> SessionRecorder.Op.REPLACE
-            else -> SessionRecorder.Op.NEW
-        }
-        if (op == SessionRecorder.Op.REPLACE && last != null && FrameDiff.same(last, thumb)) {
-            bitmap.recycle() // 똑같으면 바꿀 필요 없음
-            lastIsPreview = false
-            return
-        }
-        debug("#FRAME", "${op.name.lowercase()} ${kind.name.lowercase()}${if (forced) " forced" else ""}")
-        keep(rec, bitmap, thumb, op, null)
-        if (op == SessionRecorder.Op.NEW) {
-            scrollDy = 0
-            scrollDyKnown = false
-        }
-    }
-
-    /** 화면 1장을 화면 상태에 넣고(비교 기준으로 기억), 버튼에 확보 표시를 한다. */
-    private fun keep(rec: SessionRecorder, bitmap: Bitmap, thumb: FrameDiff.Thumb, op: SessionRecorder.Op, scrollDy: Int?) {
-        rec.addFrame(bitmap, op, scrollDy)
-        lastThumb = thumb
-        lastIsPreview = false
+        rec.addFrame(bitmap, request.scrollDy)
         overlay.pulse()
+        debug("#FRAME", "${request.kind.name.lowercase()} dy=${request.scrollDy ?: "?"}")
+    }
+
+    private companion object {
+        /** AccessibilityEvent.getScrollDeltaY 가 이동량을 모를 때 돌려주는 값. */
+        const val UNDEFINED_DELTA = -1
     }
 }

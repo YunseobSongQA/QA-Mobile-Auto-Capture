@@ -46,7 +46,7 @@ class StatusCard(private val activity: Activity, private val ui: Ui, private val
     fun refresh() {
         val serviceOn = CaptureStatus.isServiceEnabled(activity)
         val captureOn = options.captureEnabled
-        val recorded = CaptureStatus.recordingImages
+        val recorded = CaptureStatus.recordingScreens
         val (colorRes, titleText, bodyText) = when {
             !serviceOn -> Triple(
                 R.color.status_off,
@@ -63,13 +63,13 @@ class StatusCard(private val activity: Activity, private val ui: Ui, private val
             recorded != null -> Triple(
                 R.color.status_running,
                 "동작 중 · 기록 중",
-                "이미지 ${recorded}장 확보. 화면을 떠나면 그 화면 이미지가 저장됩니다. 플로팅 버튼을 누르면 기록을 정지하고 저장합니다.",
+                "화면 ${recorded}개 기록. 화면을 떠나면 그 화면 사진(스크롤한 부분은 이어붙여 1장)이 저장됩니다. 플로팅 버튼을 누르면 기록을 정지하고 저장합니다.",
             )
             else -> Triple(
                 R.color.status_running,
                 "동작 중",
-                "화면의 플로팅 버튼 [● 시작]을 누르면 기록을 시작합니다. 화면에 들어가거나 누른 뒤 화면이 다 뜨고 멈추면 1장, " +
-                    "스크롤한 부분은 한 장으로 이어붙여 저장합니다. 버튼을 길게 누르면 이 화면이 열립니다.",
+                "화면의 플로팅 버튼 [● 시작]을 누르면 기록을 시작합니다. 화면에 들어가면 1장, 스크롤을 멈출 때마다 1장 찍고 " +
+                    "그 화면을 떠날 때 겹치는 부분을 이어붙여 화면당 1장으로 저장합니다. 버튼을 길게 누르면 이 화면이 열립니다.",
             )
         }
         dot.background.setTint(ui.color(colorRes))

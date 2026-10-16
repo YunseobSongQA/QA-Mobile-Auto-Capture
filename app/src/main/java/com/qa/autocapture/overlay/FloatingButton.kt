@@ -14,8 +14,6 @@ import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.TextView
-import com.qa.autocapture.capture.policy.CaptureConfig
-import com.qa.autocapture.capture.policy.FrameDiff
 import java.util.EnumSet
 import kotlin.math.hypot
 
@@ -99,7 +97,7 @@ class FloatingButton(
         attached = false
     }
 
-    /** 대기: "● 시작"(남색), 기록 중: "■ 확보한 이미지 수"(초록 = 동작 중) */
+    /** 대기: "● 시작"(남색), 기록 중: "■ 사진을 찍은 화면 수"(초록 = 동작 중) */
     fun setRecording(recording: Boolean, savedImages: Int) {
         this.recording = recording
         images = savedImages
@@ -110,7 +108,7 @@ class FloatingButton(
         render()
     }
 
-    /** 화면을 확보했다는 표시: 잠깐 "✓ 수" 로 바뀌었다가 돌아온다. */
+    /** 사진을 찍었다는 표시: 잠깐 "✓ 수" 로 바뀌었다가 돌아온다. */
     fun pulse() {
         if (!recording) return
         pulsing = true
@@ -132,7 +130,7 @@ class FloatingButton(
                 else -> RECORDING_COLOR
             },
         )
-        view.contentDescription = if (recording) "QA 기록 중, 확보한 이미지 ${images}장. 누르면 정지" else "QA 기록 시작"
+        view.contentDescription = if (recording) "QA 기록 중, 화면 ${images}개 기록. 누르면 정지" else "QA 기록 시작"
     }
 
     /** [reason] 으로 숨긴다(창 알파와 View 를 함께). 이미 숨겨져 있으면 그대로. */
@@ -154,15 +152,6 @@ class FloatingButton(
         view.visibility = View.VISIBLE
         params.alpha = 1f
         wm.updateViewLayout(view, params)
-    }
-
-    /** 화면에서 버튼이 차지하는 영역(px, 여백 포함). 버튼을 숨기지 않고 찍은 비교 화면에서는 이 영역을 비교하지 않는다. */
-    fun screenBox(): FrameDiff.Box? {
-        if (!attached || view.width == 0) return null
-        val loc = IntArray(2)
-        view.getLocationOnScreen(loc)
-        val m = CaptureConfig.OVERLAY_MASK_MARGIN_PX
-        return FrameDiff.Box(loc[0] - m, loc[1] - m, loc[0] + view.width + m, loc[1] + view.height + m)
     }
 
     /** (상태바 높이, 내비게이션바 높이). 스티칭의 고정 영역 최소값으로 쓴다. 크게 잡혀도 무해하다. */

@@ -9,7 +9,6 @@ import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
 import com.qa.autocapture.MainActivity
-import com.qa.autocapture.capture.policy.CaptureConfig
 import com.qa.autocapture.overlay.FloatingButton
 import com.qa.autocapture.session.SessionRecorder
 import com.qa.autocapture.session.SessionRecovery
@@ -73,29 +72,16 @@ class CaptureService : AccessibilityService() {
                 }
                 val cls = event.className?.toString()
                 if (cls.isNullOrEmpty()) return
-                val screen = tracker.onWindowState(pkg, cls, event.windowId)
-                when {
-                    screen == null -> c.onContentChanged() // 토스트 창 등은 화면이 아니다
-                    recorder == null -> Unit
-                    // 같은 창 안의 화면 바뀜(창 제목·패널 변경)은 터치처럼 확인한다
-                    screen != c.current -> c.switchTo(screen)
-                    else -> c.onAction()
-                }
+                // 토스트 창은 화면이 아니다(null)
+                val screen = tracker.onWindowState(pkg, cls, event.windowId) ?: return
+                c.onWindowState(screen)
             }
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                 if (recorder == null || tracker.isIgnored(pkg)) return
                 val screen = tracker.screenOf(pkg, event.windowId, c.current) ?: return
-                if (isSmallScroller(event)) {
-                    c.onContentChanged() // 작은 영역(티커 등)의 스크롤은 이어붙일 대상이 아니다
-                } else {
-                    c.onScroll(screen, event.scrollDeltaX, event.scrollDeltaY)
-                }
+                // 작은 영역(티커 등)의 스크롤은 이어붙일 대상이 아니다
+                if (!isSmallScroller(event)) c.onScroll(screen, event.scrollDeltaX, event.scrollDeltaY)
             }
-            AccessibilityEvent.TYPE_VIEW_CLICKED,
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
-            -> if (pkg == c.current?.packageName) c.onAction()
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> if (pkg == c.current?.packageName) c.onContentChanged()
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
                 if (pkg != packageName && event.className?.contains("Toast") == true) c.onToast(pkg, DebugLog.eventText(event))
             }
@@ -170,31 +156,31 @@ class CaptureService : AccessibilityService() {
         val c = controller ?: return
         tracker.refreshIgnoredPackages()
         val (top, bottom) = button.systemBarInsets()
-        val rec = SessionRecorder(applicationContext, top, bottom) { sessionId, images ->
+        val rec = SessionRecorder(applicationContext, top, bottom) { sessionId, screens ->
             if (recorder?.sessionId == sessionId) {
-                overlay?.setRecording(true, images)
-                CaptureStatus.recordingImages = images
+                overlay?.setRecording(true, screens)
+                CaptureStatus.recordingScreens = screens
                 CaptureStatus.notifyChanged()
             }
         }
         recorder = rec
-        CaptureStatus.recordingImages = 0
+        CaptureStatus.recordingScreens = 0
         button.setRecording(true, 0)
         if (options.debugLog) {
             debugLog = DebugLog(applicationContext, rec.sessionId)
             applyEventTypes()
         }
-        c.start(rec, top, bottom)
+        c.start(rec)
         notifyState()
         // 이미 앱 화면 위에서 시작했다면 그 화면부터 기록
-        tracker.activeScreen()?.let { c.switchTo(it) }
+        tracker.activeScreen()?.let { c.onWindowState(it) }
     }
 
     private fun stopSession(reason: String) {
         val rec = recorder ?: return
         controller?.stop()
         recorder = null
-        CaptureStatus.recordingImages = null
+        CaptureStatus.recordingScreens = null
         debugLog?.let {
             it.close()
             debugLog = null
@@ -222,10 +208,6 @@ class CaptureService : AccessibilityService() {
         /** res/xml/accessibility_service_config.xml 의 accessibilityEventTypes 와 같아야 한다 */
         const val CAPTURE_EVENT_TYPES = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
             AccessibilityEvent.TYPE_VIEW_SCROLLED or
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
-            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED or
-            AccessibilityEvent.TYPE_VIEW_CLICKED or
-            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED or
-            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
     }
 }

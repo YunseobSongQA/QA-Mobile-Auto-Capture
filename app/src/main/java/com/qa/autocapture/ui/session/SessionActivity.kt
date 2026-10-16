@@ -202,7 +202,7 @@ class SessionActivity : Activity() {
         val c = captures[name]
         val time = c?.let { Times.format(it.at, "HH:mm:ss") }
         val kind = when {
-            c != null && c.frames > 1 -> "스크롤 이어붙임 · 화면 ${c.frames}장"
+            c != null && c.frames > 1 -> "스크롤 이어붙임 · 사진 ${c.frames}장"
             // 이전 버전 파일 이름
             name.contains("_scroll") || name.contains("_full") -> "스크롤 이어붙인 이미지"
             name.contains("_final") -> "최종 화면"

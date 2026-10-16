@@ -5,7 +5,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.inputmethod.InputMethodManager
-import com.qa.autocapture.capture.policy.CaptureConfig
 
 /** 화면 식별자 = 앱 패키지 + 화면 클래스. */
 data class Screen(val packageName: String, val className: String)

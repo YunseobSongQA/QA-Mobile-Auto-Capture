@@ -7,7 +7,7 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import com.qa.autocapture.R
-import com.qa.autocapture.capture.policy.CaptureConfig
+import com.qa.autocapture.capture.CaptureConfig
 import com.qa.autocapture.storage.Options
 import com.qa.autocapture.storage.StoragePaths
 import com.qa.autocapture.ui.common.Ui
@@ -15,7 +15,7 @@ import com.qa.autocapture.ui.common.Ui.ButtonStyle
 import com.qa.autocapture.ui.common.Ui.Type
 import java.util.Locale
 
-/** 설정 화면: 캡처 타이밍(SETTLE_MS, MAX_WAIT_MS)과 디버그 로그. 값은 Options 에 바로 저장된다. */
+/** 설정 화면: 화면 진입 후 대기 시간과 디버그 로그. 값은 Options 에 바로 저장된다. */
 class SettingsActivity : Activity() {
 
     private lateinit var ui: Ui
@@ -32,32 +32,14 @@ class SettingsActivity : Activity() {
         val timing = ui.card()
         timing.addView(
             slider(
-                "안정화 대기 (SETTLE_MS)",
-                "화면 변화가 이 시간 동안 없으면 정지 확인(${seconds(CaptureConfig.CONFIRM_MS)})을 거쳐 완성된 화면을 1장 찍습니다. " +
-                    "로딩이 느린 앱이면 늘리세요.",
-                CaptureConfig.SETTLE_MIN_MS,
-                CaptureConfig.SETTLE_MAX_MS,
-                CaptureConfig.SETTLE_STEP_MS,
+                "화면 진입 후 대기",
+                "화면에 들어간 뒤 이 시간이 지나면 1장 찍습니다(전환 애니메이션이 끝날 때까지). " +
+                    "토스트가 떠 있거나 로딩 표시가 돌면 사라질 때까지 조금 더 기다립니다. 화면이 늦게 뜨는 앱이면 늘리세요.",
+                CaptureConfig.ENTRY_SETTLE_MIN_MS,
+                CaptureConfig.ENTRY_SETTLE_MAX_MS,
+                CaptureConfig.ENTRY_SETTLE_STEP_MS,
                 { options.settleMs },
                 { options.settleMs = it },
-            ),
-        )
-        timing.addView(
-            ui.divider().apply {
-                val lp = layoutParams as LinearLayout.LayoutParams
-                lp.topMargin = ui.dp(16)
-                lp.bottomMargin = ui.dp(16)
-            },
-        )
-        timing.addView(
-            slider(
-                "최대 대기 (MAX_WAIT_MS)",
-                "화면에 들어가거나 누른 뒤 계속 움직여도(동영상, 애니메이션) 이 시간이 지나면 그 시점 화면을 찍습니다.",
-                CaptureConfig.MAX_WAIT_MIN_MS,
-                CaptureConfig.MAX_WAIT_MAX_MS,
-                CaptureConfig.MAX_WAIT_STEP_MS,
-                { options.maxWaitMs },
-                { options.maxWaitMs = it },
             ),
         )
         val reset = ui.button("기본값으로 되돌리기", ButtonStyle.TEXT) {
@@ -71,7 +53,7 @@ class SettingsActivity : Activity() {
         content.addView(timing)
         content.addView(
             ui.text(
-                "기본값: 안정화 대기 ${seconds(CaptureConfig.SETTLE_MS)}, 최대 대기 ${seconds(CaptureConfig.MAX_WAIT_MS)}. 바꾼 값은 바로 적용됩니다.",
+                "기본값 ${seconds(CaptureConfig.ENTRY_SETTLE_MS)}. 바꾼 값은 바로 적용됩니다.",
                 Type.BODY_SMALL,
                 R.color.on_surface_variant,
             ).apply { setPadding(ui.dp(4), 0, ui.dp(4), 0) },

@@ -42,7 +42,7 @@ class CaptureTileService : TileService() {
         tile.subtitle = when {
             !serviceOn -> "서비스 꺼짐"
             !on -> "일시정지"
-            CaptureStatus.recordingImages != null -> "기록 중"
+            CaptureStatus.recordingScreens != null -> "기록 중"
             else -> "동작 중"
         }
         tile.updateTile()

@@ -8,8 +8,8 @@ import com.qa.autocapture.storage.TextLog
 /**
  * 디버그 로그(설정 화면에서 켬): 기록 중 받은 접근성 이벤트와 서비스의 판단을 한 줄씩 남긴다.
  * 저장 위치 Documents/QAEvidence/debug/{세션}.txt.
- * 판단 태그: #SHOT(촬영), #FRAME(확보), #NOCHANGE(바뀐 게 없어 안 찍음), #SCROLL(스크롤 시작·중간·멈춤),
- * #WAIT(토스트·로딩이라 미룸), #DROP(토스트가 찍혀 버림), #SHOT_FAIL(촬영 실패).
+ * 판단 태그: #SHOT(촬영), #FRAME(저장할 사진), #SCROLL(스크롤 시작·중간·멈춤),
+ * #WAIT(진입 사진을 토스트·로딩 때문에 미룸), #DROP(토스트가 찍혀 버림), #SHOT_FAIL(촬영 실패).
  */
 class DebugLog(context: Context, sessionId: String) {
 
