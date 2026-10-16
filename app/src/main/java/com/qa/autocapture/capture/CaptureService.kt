@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -21,24 +22,33 @@ import com.qa.autocapture.session.SessionRecorder
 import com.qa.autocapture.storage.EvidenceStore
 import com.qa.autocapture.storage.Options
 import com.qa.autocapture.storage.TextLog
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
- * 접근성 서비스. 화면 변화를 감지해 스크린샷을 찍고 SessionRecorder 에 넘긴다. 판단 규칙 없이 아래만 한다.
+ * 접근성 서비스. 보고하기 좋은 화면만 골라 찍어 SessionRecorder 에 넘긴다.
  *
- * - 화면 식별자 = packageName + className (창 ID 별로 처음 본 className)
- * - 세로 스크롤 중에는 개별 캡처를 하지 않고, 스크롤이 멈출 때마다 이어붙일 프레임 1장만 찍는다 (ScrollTimer)
- * - 스크롤이 아닌 화면 변화(창 전환·내용 변경·토스트)마다 캡처. 변화가 이어지면 takeScreenshot 최소 간격으로 계속 찍는다.
- * - 그 변화가 SETTLE_MS 동안 없거나, 계속돼도 MAX_WAIT_MS 가 지나면 최종 화면(_final) 1장 (FinalTimer)
- * - 마스터 스위치(Options.captureEnabled)를 끄면 플로팅 버튼을 숨기고 이벤트를 받지 않는다
- * - 캡처 직전 플로팅 버튼을 숨기고 캡처 후 다시 보인다
+ * - 찍는 때(중요한 때만): 화면 진입, 터치·길게 누르기·입력, 스크롤 멈춤.
+ *   앱이 스스로 바뀐 것(배너, 시계, 애니메이션)은 화면 대부분이 바뀌었을 때만.
+ * - 찍는 화면: 이벤트가 SETTLE_MS 동안 없고, CONFIRM_MS 간격의 두 화면이 같은 "정적으로 완성된" 화면 (SettleCycle).
+ *   비교용 화면은 플로팅 버튼을 숨기지 않고 찍고(깜빡임 없음), 저장할 1장만 버튼을 숨기고 찍는다.
+ * - 스크롤: 스크롤 중에는 찍지 않고 멈출 때마다 1장 → 같은 화면 상태에 덧붙여 나중에 긴 이미지 1장 (ScrollTimer).
+ * - 화면 상태: 작은 변화는 그 상태 이미지를 최신 화면으로 바꾸고, 뚜렷이 바뀌면 새 이미지.
+ * - 마스터 스위치(Options.captureEnabled)를 끄면 플로팅 버튼을 숨기고 이벤트를 받지 않는다.
  * 이벤트 흐름은 DESIGN.md 3장 참고.
  */
 class CaptureService : AccessibilityService() {
 
     private data class Screen(val packageName: String, val className: String)
 
+    private enum class Purpose { PREVIEW, PROBE, FINAL, SCROLL }
+
+    /** 찍을 것. [generation] = SettleCycle 의 판단 번호(스크롤은 0). */
+    private class Shot(val purpose: Purpose, val generation: Int)
+
     private val handler = Handler(Looper.getMainLooper())
-    private val finalTimer = FinalTimer()
+    private val analyzer = Executors.newSingleThreadExecutor { Thread(it, "qa-analyze") }
+    private val cycle = SettleCycle()
     private val scrollTimer = ScrollTimer()
     private lateinit var options: Options
     private var overlay: FloatingButton? = null
@@ -47,6 +57,10 @@ class CaptureService : AccessibilityService() {
 
     /** 마스터 스위치. false 면 이벤트 처리·캡처를 모두 멈춘다. */
     private var enabled = false
+
+    /** 비교에서 뺄 상태바·내비게이션바 높이(세션 시작 때). */
+    private var insetTop = 0
+    private var insetBottom = 0
 
     /** 이벤트를 무시할 패키지: 이 앱, 런처, 시스템 UI, 키보드 */
     private val ignoredPackages = HashSet<String>()
@@ -63,35 +77,34 @@ class CaptureService : AccessibilityService() {
     private var lastSeen: Screen? = null
     private var current: Screen? = null
 
-    // 캡처 큐 상태
-    private var changeWanted = false // 화면 변화 캡처
-    private var finalWanted = false // 최종 캡처
-    private var scrollWanted = false // 스크롤이 멈춘 뒤 이어붙일 프레임
-    private var finalSegment = 0 // 최종 판단을 내린 화면 구간
-    private var capturing = false // 촬영 예약 ~ 결과 수신
+    /** 이 화면 방문에서 마지막으로 확보한 화면(비교 기준)과, 그것이 진입 직후 미리 확보한 임시 화면인지. */
+    private var lastThumb: FrameDiff.Thumb? = null
+    private var lastIsPreview = false
+
+    // 촬영 큐
+    private var wanted: Shot? = null
+    private var shooting = false // 촬영 예약 ~ 결과 수신
     private var inFlight = false // takeScreenshot 호출 ~ 결과 수신
     private var lastShotAt = 0L
-    private var finalCheckPending = false
+    private var cycleCheckPending = false
     private var scrollCheckPending = false
+    private var changeCooldownUntil = 0L
 
-    /** 직전 촬영 이후 세로 스크롤 이동량(scrollDeltaY 합). 0 이 아닌 값이 한 번도 없으면 모르는 것으로 본다. */
+    /** 마지막으로 확보한 화면 이후 세로 스크롤 이동량(scrollDeltaY 합). 0 이 아닌 값이 없으면 모르는 것으로 본다. */
     private var scrollDy = 0
     private var scrollDyKnown = false
 
-    private val finalCheck = Runnable {
-        finalCheckPending = false
-        checkFinal()
+    private val cycleCheck = Runnable {
+        cycleCheckPending = false
+        checkCycle()
     }
     private val scrollCheck = Runnable {
         scrollCheckPending = false
         checkScroll()
     }
-    private val hideAndShoot = Runnable {
-        overlay?.hideForCapture()
-        handler.postDelayed(shoot, CaptureConfig.HIDE_SETTLE_MS)
-    }
+    private val prepare = Runnable { prepareShot() }
     private val shoot = Runnable { takeShot() }
-    private val pump = Runnable { pumpCapture() }
+    private val pump = Runnable { pumpShot() }
 
     /** 설정 화면·빠른 설정 타일에서 마스터 스위치를 바꾸면 바로 반영한다. */
     private val optionsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
@@ -127,8 +140,12 @@ class CaptureService : AccessibilityService() {
                 if (pkg in ignoredPackages) return
                 onViewScrolled(pkg, event.windowId, event.scrollDeltaX, event.scrollDeltaY)
             }
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            -> if (pkg == current?.packageName) onAction()
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                if (pkg == current?.packageName) onChange()
+                if (pkg == current?.packageName) onContentChanged()
             }
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
                 if (pkg != packageName && event.className?.contains("Toast") == true) onToast(pkg, eventText(event))
@@ -143,6 +160,7 @@ class CaptureService : AccessibilityService() {
         stopSession("서비스 꺼짐")
         if (::options.isInitialized) options.unlisten(optionsListener)
         handler.removeCallbacksAndMessages(null)
+        analyzer.shutdown()
         overlay?.remove()
         overlay = null
         connected = false
@@ -185,24 +203,24 @@ class CaptureService : AccessibilityService() {
     private fun onWindowStateChanged(pkg: String, cls: String?, windowId: Int) {
         if (cls.isNullOrEmpty()) return
         if (cls.startsWith("android.widget.Toast")) {
-            onChange() // 토스트 창은 화면이 아니지만 화면 변화다
+            onContentChanged() // 토스트 창은 화면이 아니다
             return
         }
         val screen = windowScreens[windowId]
             ?: Screen(pkg, cls).also { if (windowId >= 0) windowScreens[windowId] = it }
         lastSeen = screen
         if (recorder == null) return
-        switchTo(screen)
-        onChange()
+        // 같은 창 안의 화면 바뀜(창 제목·패널 변경)은 터치처럼 확인한다
+        if (screen != current) switchTo(screen) else onAction()
     }
 
     private fun onViewScrolled(pkg: String, windowId: Int, dx: Int, dy: Int) {
         if (recorder == null) return
         // 다이얼로그가 닫히고 원래 화면을 스크롤하면 그 화면으로 돌아간다
         val screen = windowScreens[windowId] ?: current?.takeIf { it.packageName == pkg } ?: return
-        switchTo(screen)
+        if (screen != current) switchTo(screen)
         if (dy == 0 && dx != 0) {
-            onChange() // 가로로만 스크롤(배너·탭 넘기기)은 이어붙일 수 없으므로 일반 화면 변화로 본다
+            onContentChanged() // 가로로만 스크롤(배너·탭 넘기기)은 이어붙일 수 없으므로 화면 변화로 본다
             return
         }
         if (dy != 0) {
@@ -210,35 +228,98 @@ class CaptureService : AccessibilityService() {
             scrollDyKnown = true
         }
         if (!scrollTimer.active) {
-            // 이어붙이기 모드: 스크롤 중의 변화 캡처·최종 캡처는 하지 않는다
+            // 스크롤 중에는 정지 확인을 멈추고 멈출 때까지 기다린다
             debug("#SCROLL", "start")
-            finalTimer.cancel()
-            handler.removeCallbacks(finalCheck)
-            finalCheckPending = false
-            changeWanted = false
-            finalWanted = false
+            stopCycle()
         }
         scrollTimer.onScroll(SystemClock.uptimeMillis())
         if (!scrollCheckPending) checkScroll()
     }
 
     private fun switchTo(screen: Screen) {
-        if (screen == current) return
         current = screen
-        // 최종 캡처와 이어붙이기는 화면마다 따로 한다(이어붙이던 이미지는 recorder 가 저장)
-        finalTimer.cancel()
-        finalWanted = false
+        stopCycle()
         resetScroll()
+        lastThumb = null
+        lastIsPreview = false
         recorder?.enterScreen(screen.packageName, screen.className)
+        startCycle(SettleCycle.Kind.ACTION, preview = true)
+    }
+
+    // ── 언제 찍을지 ──────────────────────────────────────────────
+
+    /** 터치·입력: 화면이 바뀌었으면 완성된 뒤 찍는다. */
+    private fun onAction() {
+        if (recorder == null || current == null) return
+        if (scrollTimer.active) {
+            scrollTimer.onActivity(SystemClock.uptimeMillis())
+            return
+        }
+        startCycle(SettleCycle.Kind.ACTION)
+    }
+
+    /** 내용 변경: 확인 중이면 아직 바뀌는 중이라는 뜻, 아니면 앱이 스스로 바뀐 것(큰 변화일 때만 찍음). */
+    private fun onContentChanged() {
+        if (recorder == null || current == null) return
+        val now = SystemClock.uptimeMillis()
+        when {
+            scrollTimer.active -> scrollTimer.onActivity(now)
+            cycle.active -> {
+                cycle.onActivity(now)
+                // 대기 중인 판단이 있으면 그때 마지막 변화 시각으로 다시 잰다(이벤트마다 타이머를 다시 걸지 않음)
+                if (!cycleCheckPending) checkCycle()
+            }
+            now >= changeCooldownUntil -> startCycle(SettleCycle.Kind.CHANGE)
+        }
+    }
+
+    private fun onToast(pkg: String, text: String) {
+        val rec = recorder ?: return
+        rec.logToast(System.currentTimeMillis(), pkg, text, current?.className)
+        onContentChanged()
+    }
+
+    private fun startCycle(kind: SettleCycle.Kind, preview: Boolean = false) {
+        cycle.start(kind, SystemClock.uptimeMillis(), preview)
+        checkCycle()
+    }
+
+    private fun stopCycle() {
+        cycle.cancel()
+        handler.removeCallbacks(cycleCheck)
+        cycleCheckPending = false
+        if (wanted?.purpose != Purpose.SCROLL) wanted = null
     }
 
     private fun resetScroll() {
         scrollTimer.cancel()
         handler.removeCallbacks(scrollCheck)
         scrollCheckPending = false
-        scrollWanted = false
+        if (wanted?.purpose == Purpose.SCROLL) wanted = null
         scrollDy = 0
         scrollDyKnown = false
+    }
+
+    private fun checkCycle() {
+        handler.removeCallbacks(cycleCheck)
+        cycleCheckPending = false
+        if (recorder == null) return
+        val now = SystemClock.uptimeMillis()
+        when (val d = cycle.evaluate(now, options.settleMs, CaptureConfig.CONFIRM_MS, options.maxWaitMs)) {
+            is SettleCycle.Decision.Wait -> {
+                cycleCheckPending = true
+                handler.postAtTime(cycleCheck, d.at)
+            }
+            is SettleCycle.Decision.Take -> {
+                val purpose = when (d.shot) {
+                    SettleCycle.Shot.PREVIEW -> Purpose.PREVIEW
+                    SettleCycle.Shot.PROBE -> Purpose.PROBE
+                    SettleCycle.Shot.FINAL -> Purpose.FINAL
+                }
+                want(Shot(purpose, d.generation))
+            }
+            SettleCycle.Decision.Idle -> Unit
+        }
     }
 
     /** 스크롤이 멈췄는지 판단한다. 멈췄으면 이어붙일 프레임 1장을 요청한다. */
@@ -251,160 +332,240 @@ class CaptureService : AccessibilityService() {
             }
             ScrollTimer.Decision.Capture -> {
                 debug("#SCROLL", "stop dy=${if (scrollDyKnown) scrollDy else "?"}")
-                scrollWanted = true
-                pumpCapture()
+                want(Shot(Purpose.SCROLL, 0))
             }
             ScrollTimer.Decision.Idle -> Unit
         }
     }
 
-    // ── 화면 변화 → 캡처 ─────────────────────────────────────────
-
-    private fun onChange() {
-        if (recorder == null || current == null) return
-        if (scrollTimer.active) {
-            // 스크롤 중 내용 변경(새 항목 그리기 등)은 스크롤의 일부: 멈춤 대기만 늘린다
-            scrollTimer.onActivity(SystemClock.uptimeMillis())
-            return
-        }
-        finalTimer.onChange(SystemClock.uptimeMillis())
-        changeWanted = true
-        pumpCapture()
-        // 대기 중인 판단이 있으면 그때 마지막 변화 시각으로 다시 잰다(이벤트마다 타이머를 다시 걸지 않음)
-        if (!finalCheckPending) checkFinal()
-    }
-
-    private fun checkFinal() {
-        val rec = recorder ?: return
-        val now = SystemClock.uptimeMillis()
-        when (val d = finalTimer.evaluate(now, options.settleMs, options.maxWaitMs)) {
-            is FinalTimer.Decision.Wait -> {
-                finalCheckPending = true
-                handler.postAtTime(finalCheck, d.at)
-            }
-            is FinalTimer.Decision.Final -> {
-                debug("#FINAL", if (d.forced) "forced" else "settled")
-                finalWanted = true
-                finalSegment = rec.currentSegment
-                pumpCapture()
-                if (d.forced) checkFinal() // 변화가 멈출 때의 최종을 위해 다시 잰다
-            }
-            FinalTimer.Decision.Idle -> Unit
-        }
-    }
-
-    /** 사용자가 홈·이 앱으로 떠났다. 기다리던 캡처를 모두 버린다(떠난 뒤 화면이 찍히지 않게). */
+    /** 사용자가 홈·이 앱으로 떠났다. 기다리던 촬영을 모두 버린다(떠난 뒤 화면이 찍히지 않게). */
     private fun cancelPending() {
-        finalTimer.cancel()
-        handler.removeCallbacks(finalCheck)
-        finalCheckPending = false
-        changeWanted = false
-        finalWanted = false
+        stopCycle()
         resetScroll()
+        wanted = null
         handler.removeCallbacks(pump)
-        if (capturing && !inFlight) {
-            handler.removeCallbacks(hideAndShoot)
+        if (shooting && !inFlight) {
+            handler.removeCallbacks(prepare)
             handler.removeCallbacks(shoot)
             finishShot()
         }
     }
 
-    // ── 캡처 큐 ─────────────────────────────────────────────────
+    // ── 촬영 ────────────────────────────────────────────────────
 
-    /** 찍을 것이 있으면 최소 간격에 맞춰 1장 예약한다. 예약 뒤 들어온 변화는 그 1장에 함께 담긴다. */
-    private fun pumpCapture() {
+    private fun want(shot: Shot) {
+        if (wanted?.purpose == Purpose.SCROLL && shot.purpose != Purpose.SCROLL) {
+            // 스크롤 프레임이 먼저다. 정지 확인은 조금 뒤 다시 판단한다
+            cycle.onShotFailed(shot.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
+            checkCycle()
+            return
+        }
+        wanted = shot
+        pumpShot()
+    }
+
+    /** 찍을 것이 있으면 최소 간격에 맞춰 1장 예약한다. 버튼은 저장용 화면을 찍기 직전에만 숨긴다. */
+    private fun pumpShot() {
         val rec = recorder ?: return
-        if (capturing || !anyWanted()) return
+        val s = wanted ?: return
+        if (shooting) return
         if (rec.busy) {
-            // 저장이 밀리면 버퍼가 쌓이지 않게 잠시 미룬다
+            // 저장이 밀리면 화면이 쌓이지 않게 잠시 미룬다
             handler.removeCallbacks(pump)
             handler.postDelayed(pump, CaptureConfig.BACKLOG_RETRY_MS)
             return
         }
-        capturing = true
-        // 버튼은 촬영 직전에만 숨긴다
-        val hideAt = maxOf(
-            SystemClock.uptimeMillis(),
-            lastShotAt + CaptureConfig.MIN_SHOT_INTERVAL_MS - CaptureConfig.HIDE_SETTLE_MS,
-        )
-        handler.postAtTime(hideAndShoot, hideAt)
+        shooting = true
+        val hide = if (s.purpose == Purpose.PROBE) 0 else CaptureConfig.HIDE_SETTLE_MS
+        handler.postAtTime(prepare, maxOf(SystemClock.uptimeMillis(), lastShotAt + CaptureConfig.MIN_SHOT_INTERVAL_MS - hide))
     }
 
-    private fun anyWanted() = changeWanted || finalWanted || scrollWanted
-
-    private fun takeShot() {
-        val rec = recorder
-        if (rec == null || !anyWanted() || scrollTimer.active) {
-            // 스크롤이 다시 시작됐으면 멈출 때 다시 요청된다(스크롤 중에는 찍지 않음)
-            if (scrollTimer.active) scrollWanted = false
+    private fun prepareShot() {
+        val s = wanted
+        if (s == null || recorder == null) {
             finishShot()
             return
         }
-        val kind = when {
-            scrollWanted -> SessionRecorder.Kind.SCROLL
-            // 최종 판단 뒤 화면이 바뀌었으면 그 화면의 변화 캡처로 저장한다
-            finalWanted && finalSegment == rec.currentSegment -> SessionRecorder.Kind.FINAL
-            else -> SessionRecorder.Kind.CHANGE
+        if (s.purpose == Purpose.PROBE) {
+            takeShot()
+        } else {
+            overlay?.hideForCapture()
+            handler.postDelayed(shoot, CaptureConfig.HIDE_SETTLE_MS)
         }
-        scrollWanted = false
-        changeWanted = false
-        finalWanted = false
-        // 직전 촬영 이후 스크롤 이동량을 이 촬영에 넘기고 다시 잰다
-        val dy = if (scrollDyKnown) scrollDy else null
-        scrollDy = 0
-        scrollDyKnown = false
+    }
+
+    private fun takeShot() {
+        val s = wanted
+        wanted = null
+        val rec = recorder
+        // 스크롤이 다시 시작됐으면 멈출 때 다시 요청된다
+        if (s == null || rec == null || (s.purpose == Purpose.SCROLL && scrollTimer.active)) {
+            finishShot()
+            pumpShot()
+            return
+        }
+        val box = if (s.purpose == Purpose.PROBE) overlay?.screenBox() else null
         val segment = rec.currentSegment
+        val dy = if (s.purpose == Purpose.SCROLL && scrollDyKnown) scrollDy else null
+        if (s.purpose == Purpose.SCROLL) {
+            scrollDy = 0
+            scrollDyKnown = false
+        }
         inFlight = true
         lastShotAt = SystemClock.uptimeMillis()
-        debug("#SHOT", kind.name.lowercase())
+        debug("#SHOT", s.purpose.name.lowercase())
         takeScreenshot(
             Display.DEFAULT_DISPLAY,
             mainExecutor,
             object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
                     finishShot()
-                    when {
-                        recorder !== rec -> result.hardwareBuffer.close()
-                        // 화면이 바뀐 뒤 도착한 스크롤 프레임은 이전 화면 것이므로 버린다
-                        kind == SessionRecorder.Kind.SCROLL && segment != rec.currentSegment -> result.hardwareBuffer.close()
-                        else -> rec.addCapture(result.hardwareBuffer, result.colorSpace, kind, dy)
-                    }
-                    pumpCapture()
+                    analyze(s, result, box, segment, dy)
+                    pumpShot()
                 }
 
                 override fun onFailure(errorCode: Int) {
                     finishShot()
                     Log.w(TAG, "takeScreenshot 실패: $errorCode")
                     debug("#SHOT_FAIL", "code=$errorCode")
-                    if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT && recorder === rec) {
-                        when (kind) {
-                            SessionRecorder.Kind.SCROLL -> scrollWanted = true
-                            SessionRecorder.Kind.FINAL -> finalWanted = true
-                            SessionRecorder.Kind.CHANGE -> changeWanted = true
-                        }
-                    }
                     if (dy != null) {
                         scrollDy += dy
                         scrollDyKnown = true
                     }
-                    pumpCapture()
+                    if (recorder === rec) {
+                        if (errorCode == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
+                            if (wanted == null) wanted = s
+                        } else if (s.purpose != Purpose.SCROLL) {
+                            cycle.onShotFailed(s.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
+                            checkCycle()
+                        }
+                    }
+                    pumpShot()
                 }
             },
         )
     }
 
     private fun finishShot() {
-        capturing = false
+        shooting = false
         inFlight = false
         overlay?.restoreAfterCapture()
     }
 
-    // ── 토스트 ──────────────────────────────────────────────────
+    /** 스크린샷을 별도 스레드에서 Bitmap·축소 이미지로 바꿔 메인 스레드로 돌려준다. 비교용 화면은 축소 이미지만. */
+    private fun analyze(s: Shot, result: ScreenshotResult, box: FrameDiff.Box?, segment: Int, dy: Int?) {
+        val buffer = result.hardwareBuffer
+        val colorSpace = result.colorSpace
+        val keep = s.purpose != Purpose.PROBE
+        val top = insetTop
+        val bottom = insetBottom
+        try {
+            analyzer.execute {
+                var bitmap: Bitmap? = null
+                val thumb = try {
+                    val hardware = Bitmap.wrapHardwareBuffer(buffer, colorSpace)
+                    bitmap = hardware?.copy(Bitmap.Config.ARGB_8888, false)
+                    hardware?.recycle()
+                    bitmap?.let { thumbnail(it, top, bottom) }
+                } catch (e: Exception) {
+                    Log.w(TAG, "화면 변환 실패", e)
+                    null
+                } finally {
+                    buffer.close()
+                }
+                if (!keep || thumb == null) {
+                    bitmap?.recycle()
+                    bitmap = null
+                }
+                val frame = bitmap
+                handler.post { onAnalyzed(s, thumb, frame, box, segment, dy) }
+            }
+        } catch (e: RejectedExecutionException) {
+            buffer.close() // 서비스 종료 중
+        }
+    }
 
-    private fun onToast(pkg: String, text: String) {
-        val rec = recorder ?: return
-        rec.logToast(System.currentTimeMillis(), pkg, text, current?.className)
-        onChange()
+    private fun onAnalyzed(s: Shot, thumb: FrameDiff.Thumb?, bitmap: Bitmap?, box: FrameDiff.Box?, segment: Int, dy: Int?) {
+        val rec = recorder
+        if (rec == null || segment != rec.currentSegment || thumb == null) {
+            bitmap?.recycle()
+            if (rec != null && thumb == null && s.purpose != Purpose.SCROLL) {
+                cycle.onShotFailed(s.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
+                checkCycle()
+            }
+            return
+        }
+        val now = SystemClock.uptimeMillis()
+        if (s.purpose == Purpose.SCROLL) {
+            rec.addFrame(bitmap ?: return, SessionRecorder.Op.SCROLL, dy)
+            lastThumb = thumb
+            lastIsPreview = false
+            debug("#FRAME", "scroll dy=${dy ?: "?"}")
+            // 남은 로딩(이미지 등)이 끝나면 방금 프레임을 완성된 화면으로 바꾼다
+            startCycle(SettleCycle.Kind.COMPLETION)
+            return
+        }
+        val shot = when (s.purpose) {
+            Purpose.PREVIEW -> SettleCycle.Shot.PREVIEW
+            Purpose.PROBE -> SettleCycle.Shot.PROBE
+            else -> SettleCycle.Shot.FINAL
+        }
+        when (val o = cycle.onShot(s.generation, shot, thumb, box, lastThumb, now, CaptureConfig.CONFIRM_MS)) {
+            SettleCycle.Outcome.Preview -> {
+                if (bitmap != null && lastThumb == null) {
+                    rec.addFrame(bitmap, SessionRecorder.Op.NEW, null)
+                    lastThumb = thumb
+                    lastIsPreview = true
+                    debug("#FRAME", "preview")
+                } else {
+                    bitmap?.recycle()
+                }
+            }
+            is SettleCycle.Outcome.Accept -> deliver(rec, thumb, bitmap, o.kind, o.forced)
+            is SettleCycle.Outcome.NoChange -> {
+                bitmap?.recycle()
+                if (o.kind == SettleCycle.Kind.CHANGE) changeCooldownUntil = now + CaptureConfig.CHANGE_COOLDOWN_MS
+                debug("#NOCHANGE", o.kind.name.lowercase())
+            }
+            SettleCycle.Outcome.Continue -> bitmap?.recycle()
+        }
+        checkCycle()
+    }
+
+    /** 확정한 화면을 화면 상태에 넣는다: 작은 변화면 마지막 화면을 바꾸고, 뚜렷이 바뀌면 새 이미지. */
+    private fun deliver(rec: SessionRecorder, thumb: FrameDiff.Thumb, bitmap: Bitmap?, kind: SettleCycle.Kind, forced: Boolean) {
+        if (bitmap == null) return
+        val last = lastThumb
+        val op = when {
+            last == null -> SessionRecorder.Op.NEW
+            lastIsPreview -> SessionRecorder.Op.REPLACE // 진입 직후 임시 화면은 완성된 화면으로 바꾼다
+            kind == SettleCycle.Kind.CHANGE -> SessionRecorder.Op.NEW
+            kind == SettleCycle.Kind.COMPLETION ->
+                if (FrameDiff.changeRatio(last, thumb) < CaptureConfig.PAGE_CHANGE_RATIO) SessionRecorder.Op.REPLACE else SessionRecorder.Op.NEW
+            FrameDiff.similar(last, thumb) -> SessionRecorder.Op.REPLACE
+            else -> SessionRecorder.Op.NEW
+        }
+        if (op == SessionRecorder.Op.REPLACE && last != null && FrameDiff.same(last, thumb)) {
+            bitmap.recycle() // 똑같으면 바꿀 필요 없음
+            lastIsPreview = false
+            return
+        }
+        debug("#FRAME", "${op.name.lowercase()} ${kind.name.lowercase()}${if (forced) " forced" else ""}")
+        rec.addFrame(bitmap, op, null)
+        lastThumb = thumb
+        lastIsPreview = false
+        if (op == SessionRecorder.Op.NEW) {
+            scrollDy = 0
+            scrollDyKnown = false
+        }
+    }
+
+    private fun thumbnail(bitmap: Bitmap, topInset: Int, bottomInset: Int): FrameDiff.Thumb {
+        val w = bitmap.width
+        val h = bitmap.height
+        val top = topInset.coerceIn(0, h / 3)
+        val bottom = h - bottomInset.coerceIn(0, h / 3)
+        return FrameDiff.thumbnail(w, top, bottom) { y, count, into -> bitmap.getPixels(into, 0, w, 0, y, w, count) }
     }
 
     private fun eventText(event: AccessibilityEvent): String =
@@ -425,7 +586,7 @@ class CaptureService : AccessibilityService() {
         log.write(System.currentTimeMillis(), type, e.packageName, e.className, eventText(e).take(MAX_LOG_TEXT), extra)
     }
 
-    /** 서비스 내부 판단(촬영, 최종 캡처, 스크롤 시작·멈춤, 실패)을 디버그 로그에 남긴다. */
+    /** 서비스 내부 판단(촬영, 확보, 스크롤 시작·멈춤, 실패)을 디버그 로그에 남긴다. */
     private fun debug(tag: String, message: String) {
         debugLog?.write(System.currentTimeMillis(), tag, current?.packageName, current?.className, message)
     }
@@ -441,10 +602,12 @@ class CaptureService : AccessibilityService() {
         refreshIgnoredPackages()
         val button = overlay ?: return
         val (top, bottom) = button.systemBarInsets()
-        val rec = SessionRecorder(applicationContext, top, bottom) { sessionId, saved ->
+        insetTop = top
+        insetBottom = bottom
+        val rec = SessionRecorder(applicationContext, top, bottom) { sessionId, images ->
             if (recorder?.sessionId == sessionId) {
-                overlay?.setRecording(true, saved)
-                recordingImages = saved
+                overlay?.setRecording(true, images)
+                recordingImages = images
                 notifyListeners()
             }
         }
@@ -463,10 +626,7 @@ class CaptureService : AccessibilityService() {
         }
         notifyState()
         // 이미 앱 화면 위에서 시작했다면 그 화면부터 기록
-        activeScreen()?.let {
-            switchTo(it)
-            onChange()
-        }
+        activeScreen()?.let { switchTo(it) }
     }
 
     private fun stopSession(reason: String) {
@@ -474,6 +634,8 @@ class CaptureService : AccessibilityService() {
         cancelPending()
         recorder = null
         current = null
+        lastThumb = null
+        lastIsPreview = false
         recordingImages = null
         debugLog?.let {
             it.close()
@@ -536,7 +698,10 @@ class CaptureService : AccessibilityService() {
         private const val CAPTURE_EVENT_TYPES = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
             AccessibilityEvent.TYPE_VIEW_SCROLLED or
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
-            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
+            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED or
+            AccessibilityEvent.TYPE_VIEW_CLICKED or
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED or
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
 
         private const val MAX_LOG_TEXT = 500
         private const val MAX_WINDOWS = 256
@@ -553,7 +718,7 @@ class CaptureService : AccessibilityService() {
         var connected = false
             private set
 
-        /** 기록 중이면 저장한 이미지 수, 아니면 null. */
+        /** 기록 중이면 확보한 이미지 수, 아니면 null. */
         var recordingImages: Int? = null
             private set
 

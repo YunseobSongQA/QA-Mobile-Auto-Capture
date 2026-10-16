@@ -36,15 +36,15 @@ import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** 저장한 캡처 1장(manifest 의 captures 항목). 시각은 epoch millis. */
-class CaptureRecord(var file: String, val at: Long, var final: Boolean)
+/** 저장한 이미지 1장(manifest 의 captures 항목). [at] = 첫 화면을 찍은 시각(epoch millis), [frames] = 이어붙인 화면 수. */
+class CaptureRecord(val file: String, val at: Long, val frames: Int)
 
 /** 화면 방문 1번(manifest 의 screens 항목). 그 방문에서 첫 캡처를 저장할 때 만든다. */
 class ScreenRecord(val seq: Int, val packageName: String, val className: String, val enteredAt: Long) {
     var exitedAt: Long? = null
     val captures = mutableListOf<CaptureRecord>()
 
-    /** 스크롤하며 찍은 프레임을 이어붙인 긴 이미지 파일(…_scroll.png). */
+    /** 이전 버전의 스크롤 이미지 파일(…_scroll.png, …_full.png). 지금은 captures 에 함께 담는다. */
     var scroll: List<String> = emptyList()
 }
 
@@ -65,17 +65,18 @@ class SessionData(val id: String, val startedAt: Long) {
 /** MediaStore 에 저장된 내 파일 1개. */
 class StoredFile(val uri: Uri, val name: String, val mime: String?)
 
-/** 이어붙이기 임시 폴더의 정보: 그 화면의 순번과 결과 파일 이름 앞부분. */
-class ScrollInfo(val seq: Int, val base: String)
+/** 화면 상태 1개(결과 이미지 1장)의 임시 폴더 정보: 그 화면의 순번과 결과 파일 이름 앞부분. */
+class GroupInfo(val seq: Int, val base: String)
 
-/** 이어붙이기 임시 프레임 1장. [hint] = 직전 프레임부터의 scrollDeltaY 합(모르면 null), [base] = 스크롤 전 화면(이미 개별 캡처됨). */
-class ScrollFrameFile(val file: File, val hint: Int?, val base: Boolean)
+/** 임시 프레임 1장. [hint] = 직전 프레임부터의 scrollDeltaY 합(모르면 null). */
+class FrameFile(val file: File, val hint: Int?)
 
 /**
  * 파일 입출력 담당.
  * - 결과물: MediaStore → Documents/QAEvidence/{세션}/ (저장소 권한 없이 내 파일만 다룬다)
  * - 세션 목록·복구용 기록: noBackupFiles/sessions/{세션}/session.json
- * - 이어붙이기 임시 프레임: noBackupFiles/sessions/{세션}/scroll/{구간}/{번호}_{이동량}_{b|s}.png
+ * - 임시 프레임: noBackupFiles/sessions/{세션}/groups/{방문}_{상태}/{번호}_{이동량}.png
+ *   (화면 상태 1개 = 결과 이미지 1장. 스크롤하면 프레임이 여러 장 쌓였다가 이어붙여진다)
  */
 class EvidenceStore(context: Context) {
 
@@ -109,40 +110,45 @@ class EvidenceStore(context: Context) {
         false
     }
 
-    // ── 이어붙이기 임시 프레임 ───────────────────────────────────
+    // ── 임시 프레임 ─────────────────────────────────────────────
 
-    fun scrollDir(sessionId: String, segment: Int) =
-        File(root, "$sessionId/scroll/" + String.format(Locale.ROOT, "%04d", segment))
+    fun groupDir(sessionId: String, visit: Int, group: Int) =
+        File(root, "$sessionId/groups/" + String.format(Locale.ROOT, "%04d_%02d", visit, group))
 
-    /** 끝나지 않은(비정상 종료로 남은) 이어붙이기 폴더. */
-    fun pendingScrollDirs(sessionId: String): List<File> =
-        File(root, "$sessionId/scroll").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
+    /** 저장되지 않고 남은(비정상 종료) 임시 폴더. 이전 버전의 scroll/ 폴더도 포함한다. */
+    fun pendingGroupDirs(sessionId: String): List<File> =
+        listOf("groups", "scroll").flatMap { sub ->
+            File(root, "$sessionId/$sub").listFiles()?.filter { it.isDirectory }?.sortedBy { it.name } ?: emptyList()
+        }
 
-    fun writeScrollInfo(dir: File, info: ScrollInfo) {
+    fun writeGroupInfo(dir: File, info: GroupInfo) {
         dir.mkdirs()
-        File(dir, SCROLL_INFO_FILE).writeText("${info.seq}\n${info.base}")
+        File(dir, GROUP_INFO_FILE).writeText("${info.seq}\n${info.base}")
     }
 
-    fun readScrollInfo(dir: File): ScrollInfo? = try {
-        val lines = File(dir, SCROLL_INFO_FILE).readLines()
-        ScrollInfo(lines[0].trim().toInt(), lines[1].trim())
+    fun readGroupInfo(dir: File): GroupInfo? = try {
+        val lines = File(dir, GROUP_INFO_FILE).readLines()
+        GroupInfo(lines[0].trim().toInt(), lines[1].trim())
     } catch (e: Exception) {
         null
     }
 
-    /** 프레임을 임시 PNG 로 쓴다. 끝까지 쓴 파일만 .png 로 보이게 해서 반쯤 쓴 프레임을 읽지 않는다. */
-    fun writeScrollFrame(dir: File, index: Int, hint: Int?, base: Boolean, bitmap: Bitmap) {
+    /** 프레임을 임시 PNG 로 쓴다(같은 번호면 덮어씀). 끝까지 쓴 파일만 .png 로 보이게 해서 반쯤 쓴 프레임을 읽지 않는다. */
+    fun writeFrame(dir: File, index: Int, hint: Int?, bitmap: Bitmap) {
         dir.mkdirs()
-        val name = String.format(Locale.ROOT, "%04d_%s_%s.png", index, hint?.toString() ?: "n", if (base) "b" else "s")
+        val name = String.format(Locale.ROOT, "%04d_%s.png", index, hint?.toString() ?: "n")
         val tmp = File(dir, "$name.tmp")
         BufferedOutputStream(FileOutputStream(tmp)).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        if (!tmp.renameTo(File(dir, name))) throw IOException("임시 프레임 저장 실패: $name")
+        val target = File(dir, name)
+        target.delete()
+        if (!tmp.renameTo(target)) throw IOException("임시 프레임 저장 실패: $name")
     }
 
-    fun listScrollFrames(dir: File): List<ScrollFrameFile> =
+    /** 번호순. 이름 = {번호}_{이동량|n}[_…](이전 버전 이름도 읽는다). */
+    fun listFrames(dir: File): List<FrameFile> =
         dir.listFiles { f -> f.name.endsWith(".png") }?.sortedBy { it.name }?.mapNotNull { f ->
             val parts = f.nameWithoutExtension.split('_')
-            if (parts.size != 3) null else ScrollFrameFile(f, parts[1].toIntOrNull(), parts[2] == "b")
+            if (parts.size < 2) null else FrameFile(f, parts[1].toIntOrNull())
         } ?: emptyList()
 
     /** PNG 를 sRGB ARGB 픽셀로 읽는다(스티칭용). 같은 크기면 Bitmap 을 재사용한다. */
@@ -221,12 +227,12 @@ class EvidenceStore(context: Context) {
                 if (captures != null) {
                     for (j in 0 until captures.length()) {
                         val c = captures.getJSONObject(j)
-                        screen.captures += CaptureRecord(c.getString("file"), parseTime(c.getString("at")), c.optBoolean("final"))
+                        screen.captures += CaptureRecord(c.getString("file"), parseTime(c.getString("at")), c.optInt("frames", 1))
                     }
                 } else {
                     // 이전 버전 기록(화면마다 스티칭한 PNG 의 files 목록)
                     val files = s.optJSONArray("files") ?: JSONArray()
-                    for (j in 0 until files.length()) screen.captures += CaptureRecord(files.getString(j), enteredAt, false)
+                    for (j in 0 until files.length()) screen.captures += CaptureRecord(files.getString(j), enteredAt, 1)
                 }
                 // "full" = 이전 버전의 긴 이미지 기록
                 (s.optJSONArray("scroll") ?: s.optJSONArray("full"))?.let { a -> screen.scroll = List(a.length()) { a.getString(it) } }
@@ -253,18 +259,17 @@ class EvidenceStore(context: Context) {
         for (s in session.screens) {
             val captures = JSONArray()
             for (c in s.captures) {
-                captures.put(JSONObject().put("file", c.file).put("at", isoTime(c.at)).put("final", c.final))
+                captures.put(JSONObject().put("file", c.file).put("at", isoTime(c.at)).put("frames", c.frames))
             }
-            screens.put(
-                JSONObject()
-                    .put("seq", s.seq)
-                    .put("packageName", s.packageName)
-                    .put("className", s.className)
-                    .put("enteredAt", isoTime(s.enteredAt))
-                    .put("exitedAt", s.exitedAt?.let { isoTime(it) } ?: JSONObject.NULL)
-                    .put("captures", captures)
-                    .put("scroll", JSONArray(s.scroll)),
-            )
+            val screen = JSONObject()
+                .put("seq", s.seq)
+                .put("packageName", s.packageName)
+                .put("className", s.className)
+                .put("enteredAt", isoTime(s.enteredAt))
+                .put("exitedAt", s.exitedAt?.let { isoTime(it) } ?: JSONObject.NULL)
+                .put("captures", captures)
+            if (s.scroll.isNotEmpty()) screen.put("scroll", JSONArray(s.scroll)) // 이전 버전 기록
+            screens.put(screen)
         }
         val toasts = JSONArray()
         for (t in session.toasts) {
@@ -406,7 +411,7 @@ class EvidenceStore(context: Context) {
         private const val TAG = "EvidenceStore"
         private const val SESSION_FILE = "session.json"
         private const val MANIFEST_FILE = "manifest.json"
-        private const val SCROLL_INFO_FILE = "info.txt"
+        private const val GROUP_INFO_FILE = "info.txt"
 
         /** 세션 폴더의 텍스트 로그(토스트 문구, 화면 진입, 저장한 파일을 시각과 함께). */
         const val SESSION_LOG_FILE = "session_log.txt"

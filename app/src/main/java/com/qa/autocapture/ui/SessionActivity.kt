@@ -198,10 +198,11 @@ class SessionActivity : Activity() {
         val c = captures[name]
         val time = c?.let { EvidenceStore.format(it.at, "HH:mm:ss") }
         val kind = when {
-            // _full = 이전 버전의 긴 이미지
+            c != null && c.frames > 1 -> "스크롤 이어붙임 · 화면 ${c.frames}장"
+            // 이전 버전 파일 이름
             name.contains("_scroll") || name.contains("_full") -> "스크롤 이어붙인 이미지"
-            c?.final == true || name.contains("_final") -> "최종 화면"
-            else -> "화면 변화"
+            name.contains("_final") -> "최종 화면"
+            else -> "화면"
         }
         return listOfNotNull(time, kind).joinToString(" · ")
     }

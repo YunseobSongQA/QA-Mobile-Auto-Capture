@@ -25,7 +25,7 @@ import com.qa.autocapture.ui.Ui.Type
 
 /**
  * 앱 메인 화면(레이아웃 XML 없이 코드로 구성). 위에서부터
- * 1) 상태 카드 + 마스터 스위치  2) 설정 안내(4단계, 다 끝나면 접힘)  3) 저장된 세션 목록  4) 개인정보 및 권한.
+ * 1) 상태 카드 + 마스터 스위치  2) 설정 안내(3단계, 다 끝나면 접힘)  3) 저장된 세션 목록  4) 개인정보 및 권한.
  * 타이밍·디버그 로그 설정은 오른쪽 위 설정 화면(SettingsActivity)에 있다.
  */
 class MainActivity : Activity() {
@@ -160,13 +160,13 @@ class MainActivity : Activity() {
             recorded != null -> Triple(
                 R.color.status_running,
                 "동작 중 · 기록 중",
-                "이미지 ${recorded}장 저장됨. 플로팅 버튼을 누르면 기록을 정지하고 저장합니다.",
+                "이미지 ${recorded}장 확보. 화면을 떠나면 그 화면 이미지가 저장됩니다. 플로팅 버튼을 누르면 기록을 정지하고 저장합니다.",
             )
             else -> Triple(
                 R.color.status_running,
                 "동작 중",
-                "화면의 플로팅 버튼 [● 시작]을 누르면 기록을 시작합니다. 화면이 바뀔 때마다 캡처하고, " +
-                    "화면이 멈추면 최종 화면(_final)을 1장 더 저장합니다. 버튼을 길게 누르면 이 화면이 열립니다.",
+                "화면의 플로팅 버튼 [● 시작]을 누르면 기록을 시작합니다. 화면에 들어가거나 누른 뒤 화면이 다 뜨고 멈추면 1장, " +
+                    "스크롤한 부분은 한 장으로 이어붙여 저장합니다. 버튼을 길게 누르면 이 화면이 열립니다.",
             )
         }
         statusDot.background.setTint(ui.color(colorRes))
@@ -209,41 +209,34 @@ class MainActivity : Activity() {
         val serviceOn = { CaptureService.isEnabled(this) }
         addStep(
             1,
-            "접근성 설정에서 앱을 한 번 누르기",
-            "[접근성 설정 열기] → 설치된 앱 → \"$app\"를 한 번 누릅니다. \"제한된 설정\" 팝업이 뜨면 [확인]을 누릅니다. " +
-                "이걸 먼저 해야 2단계의 \"제한된 설정 허용\" 메뉴가 나타납니다.",
-            "접근성 설정 열기",
-            accessibility,
+            "제한된 설정 허용 (가장 먼저)",
+            "홈 화면에서 \"$app\" 아이콘을 길게 누르고 ⓘ(앱 정보)를 누릅니다. 또는 설정 → 애플리케이션 → $app 으로 들어갑니다. " +
+                "오른쪽 위 ⋮(점 세 개) → \"제한된 설정 허용\" → PIN(또는 지문)을 입력합니다. 아래 [앱 정보 열기]로 바로 갈 수 있습니다.\n" +
+                "⋮ 에 \"제한된 설정 허용\"이 없으면: [접근성 설정 열기] → 설치된 앱 → $app 을 한 번 눌러 \"제한된 설정\" 안내를 띄우고 " +
+                "[확인]을 누른 뒤 다시 ⋮ 메뉴로 갑니다.",
+            listOf("앱 정보 열기" to appInfo, "메뉴가 없을 때: 접근성 설정 열기" to accessibility),
             serviceOn,
         )
         addStep(
             2,
-            "제한된 설정 허용",
-            "[앱 정보 열기] → 오른쪽 위 ⋮ → \"제한된 설정 허용\" → PIN(또는 지문)을 입력합니다. ⋮ 메뉴에 항목이 없으면 1단계를 먼저 하세요.",
-            "앱 정보 열기",
-            appInfo,
+            "접근성 서비스 켜기",
+            "[접근성 설정 열기] → 설치된 앱 → $app → 스위치를 켜고 [허용]을 누릅니다. " +
+                "켜지면 1·2단계가 자동으로 완료 표시되고 화면 오른쪽에 [● 시작] 버튼이 나타납니다.",
+            listOf("접근성 설정 열기" to accessibility),
             serviceOn,
         )
         addStep(
             3,
-            "접근성 서비스 켜기",
-            "[접근성 설정 열기] → 설치된 앱 → $app → 스위치를 켜고 [허용]을 누릅니다. 켜지면 1~3단계가 자동으로 완료 표시됩니다.",
-            "접근성 설정 열기",
-            accessibility,
-            serviceOn,
-        )
-        addStep(
-            4,
             "배터리 \"제한 없음\", 사용하지 않는 앱 관리 끄기",
             "[앱 정보 열기] → 배터리 → \"제한 없음\"을 고릅니다. 앱 정보로 돌아와 \"사용하지 않는 앱 관리\"를 끕니다. " +
                 "서비스가 중간에 꺼지지 않게 합니다.",
-            "앱 정보 열기",
-            appInfo,
+            listOf("앱 정보 열기" to appInfo),
         ) { getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(packageName) == true }
         return setupCard
     }
 
-    private fun addStep(number: Int, title: String, help: String, actionLabel: String, action: () -> Unit, done: () -> Boolean) {
+    /** 단계 1개: 번호(완료면 체크), 제목, 구체적인 메뉴 경로, 해당 설정 화면으로 바로 가는 버튼(첫 버튼이 주 동작). */
+    private fun addStep(number: Int, title: String, help: String, actions: List<Pair<String, () -> Unit>>, done: () -> Boolean) {
         val row = ui.row().apply {
             gravity = Gravity.TOP
             setPadding(0, ui.dp(16), 0, 0)
@@ -253,7 +246,10 @@ class MainActivity : Activity() {
         val texts = ui.column()
         texts.addView(ui.text(title, Type.LABEL_LARGE))
         texts.addView(ui.text(help, Type.BODY_SMALL, R.color.on_surface_variant).apply { setPadding(0, ui.dp(2), 0, ui.dp(8)) })
-        texts.addView(ui.button(actionLabel, ButtonStyle.TONAL, action), LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP))
+        actions.forEachIndexed { i, (label, action) ->
+            val style = if (i == 0) ButtonStyle.TONAL else ButtonStyle.TEXT
+            texts.addView(ui.button(label, style, action), LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP).apply { if (i > 0) topMargin = ui.dp(4) })
+        }
         row.addView(texts, LinearLayout.LayoutParams(0, Ui.WRAP, 1f).apply { marginStart = ui.dp(12) })
         setupBody.addView(row)
         steps += Step(badgeHolder, number, done)

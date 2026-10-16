@@ -14,7 +14,7 @@ import com.qa.autocapture.ui.Ui.ButtonStyle
 import com.qa.autocapture.ui.Ui.Type
 import java.util.Locale
 
-/** 설정 화면: 최종 캡처 타이밍(SETTLE_MS, MAX_WAIT_MS)과 디버그 로그. 값은 Options 에 바로 저장된다. */
+/** 설정 화면: 캡처 타이밍(SETTLE_MS, MAX_WAIT_MS)과 디버그 로그. 값은 Options 에 바로 저장된다. */
 class SettingsActivity : Activity() {
 
     private lateinit var ui: Ui
@@ -27,12 +27,13 @@ class SettingsActivity : Activity() {
         options = Options(this)
 
         val content = ui.column()
-        content.addView(ui.sectionTitle("최종 캡처 타이밍"))
+        content.addView(ui.sectionTitle("캡처 타이밍"))
         val timing = ui.card()
         timing.addView(
             slider(
                 "안정화 대기 (SETTLE_MS)",
-                "화면 변화가 이 시간 동안 없으면 최종 화면을 1장 더 저장합니다(파일명 끝 _final).",
+                "화면 변화가 이 시간 동안 없으면 정지 확인(${seconds(CaptureConfig.CONFIRM_MS)})을 거쳐 완성된 화면을 1장 찍습니다. " +
+                    "로딩이 느린 앱이면 늘리세요.",
                 CaptureConfig.SETTLE_MIN_MS,
                 CaptureConfig.SETTLE_MAX_MS,
                 CaptureConfig.SETTLE_STEP_MS,
@@ -50,7 +51,7 @@ class SettingsActivity : Activity() {
         timing.addView(
             slider(
                 "최대 대기 (MAX_WAIT_MS)",
-                "변화가 계속돼도(자동 넘김 배너, 로딩 애니메이션 등) 이 시간이 지나면 그 시점 화면을 _final 로 저장합니다.",
+                "화면에 들어가거나 누른 뒤 계속 움직여도(동영상, 애니메이션) 이 시간이 지나면 그 시점 화면을 찍습니다.",
                 CaptureConfig.MAX_WAIT_MIN_MS,
                 CaptureConfig.MAX_WAIT_MAX_MS,
                 CaptureConfig.MAX_WAIT_STEP_MS,

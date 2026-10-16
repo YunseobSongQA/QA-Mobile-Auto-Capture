@@ -13,12 +13,14 @@ import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.TextView
+import com.qa.autocapture.capture.CaptureConfig
+import com.qa.autocapture.capture.FrameDiff
 import kotlin.math.hypot
 
 /**
  * TYPE_ACCESSIBILITY_OVERLAY 로 띄우는 플로팅 버튼(오버레이 권한 불필요).
  * 탭 = 기록 시작/정지, 길게 누르기 = 앱 열기, 끌기 = 이동. 캡처 일시정지 중에는 서비스가 [remove] 해 숨긴다.
- * 캡처 직전에 숨기고 캡처 후 다시 보여 증적에 찍히지 않게 한다.
+ * 저장용 화면을 찍기 직전에만 숨기고 캡처 후 다시 보여 증적에 찍히지 않게 한다(비교용 화면은 숨기지 않음).
  */
 class FloatingButton(
     private val service: AccessibilityService,
@@ -97,6 +99,15 @@ class FloatingButton(
         view.visibility = View.VISIBLE
         params.alpha = 1f
         wm.updateViewLayout(view, params)
+    }
+
+    /** 화면에서 버튼이 차지하는 영역(px, 여백 포함). 버튼을 숨기지 않고 찍은 비교 화면에서는 이 영역을 비교하지 않는다. */
+    fun screenBox(): FrameDiff.Box? {
+        if (!attached || view.width == 0) return null
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        val m = CaptureConfig.OVERLAY_MASK_MARGIN_PX
+        return FrameDiff.Box(loc[0] - m, loc[1] - m, loc[0] + view.width + m, loc[1] + view.height + m)
     }
 
     /** (상태바 높이, 내비게이션바 높이). 스티칭의 고정 영역 최소값으로 쓴다. 크게 잡혀도 무해하다. */

@@ -2,55 +2,42 @@ package com.qa.autocapture.session
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.ColorSpace
-import android.hardware.HardwareBuffer
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.qa.autocapture.capture.CaptureConfig
-import com.qa.autocapture.capture.FrameDiff
 import com.qa.autocapture.stitch.Stitcher
 import com.qa.autocapture.stitch.renderPart
 import com.qa.autocapture.storage.CaptureRecord
 import com.qa.autocapture.storage.EvidenceStore
+import com.qa.autocapture.storage.GroupInfo
 import com.qa.autocapture.storage.ScreenRecord
-import com.qa.autocapture.storage.ScrollInfo
 import com.qa.autocapture.storage.SessionData
 import com.qa.autocapture.storage.TextLog
 import com.qa.autocapture.storage.ToastRecord
 import java.io.File
 import java.io.IOException
-import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 세션 1개(시작~정지)를 기록한다. 공개 함수는 메인 스레드에서 부른다.
  *
- * - 변화·최종 캡처: saveExecutor 에서 순서대로 저장. 직전 저장 이미지와 축소 비교해 거의 같으면 생략한다.
- *   최종 캡처(_final)가 직전 저장 이미지와 같으면 새로 저장하지 않고 그 파일 이름에 _final 을 붙인다.
- * - 스크롤 프레임: 개별 저장하지 않고 임시 폴더에 모은다. 스크롤 직전 화면(직전 촬영)을 시작 프레임으로 함께 넣는다.
- *   화면을 떠날 때 stitchExecutor 에서 이어붙여 …_scroll.png 로 저장한다.
+ * 보고용 결과: 화면 방문마다 "화면 상태" 단위로 이미지 1장. 서비스가 확정한 화면을 받아
+ * - [Op.NEW]: 새 상태 시작(이전 상태는 이미지로 저장)
+ * - [Op.REPLACE]: 같은 상태의 작은 변화 → 마지막 화면을 최신 것으로 바꿈
+ * - [Op.SCROLL]: 스크롤이 멈춘 화면 → 같은 상태에 덧붙임(나중에 이어붙여 긴 이미지 1장)
+ * 프레임은 임시 PNG 로만 두고, 상태가 끝나면(새 상태·화면 전환·정지) stitchExecutor 에서 이미지로 저장한다.
  * 세션 기록(manifest·세션 로그)은 saveExecutor 에서만 고친다.
  */
 class SessionRecorder(
     context: Context,
     private val topInset: Int,
     private val bottomInset: Int,
-    /** 이미지가 저장될 때마다 (세션ID, 저장한 이미지 수) 로 메인 스레드에서 호출 */
-    private val onSaved: (sessionId: String, savedImages: Int) -> Unit,
+    /** 확보한 이미지 수(저장 중인 것 포함)가 바뀔 때마다 (세션ID, 수) 로 메인 스레드에서 호출 */
+    private val onSaved: (sessionId: String, images: Int) -> Unit,
 ) {
-    enum class Kind {
-        /** 스크롤이 아닌 화면 변화 */
-        CHANGE,
-
-        /** 화면이 멈춘 뒤의 최종 화면 */
-        FINAL,
-
-        /** 스크롤이 멈출 때마다 찍은 이어붙이기용 프레임 */
-        SCROLL,
-    }
+    enum class Op { NEW, REPLACE, SCROLL }
 
     private val store = EvidenceStore(context)
     private val session: SessionData
@@ -58,40 +45,37 @@ class SessionRecorder(
 
     val sessionId: String get() = session.id
 
-    /** 현재 화면 구간 번호(메인 스레드). 촬영 결과가 같은 화면의 것인지 확인하는 데 쓴다. */
+    /** 현재 화면 방문 번호(메인 스레드). 촬영 결과가 같은 화면의 것인지 확인하는 데 쓴다. */
     var currentSegment = 0
         private set
 
-    /** 저장을 기다리는 캡처 수. 많이 쌓이면 서비스가 다음 캡처를 미룬다. */
+    /** 처리를 기다리는 화면 수. 많이 쌓이면 서비스가 다음 촬영을 미룬다. */
     private val pending = AtomicInteger()
     val busy: Boolean get() = pending.get() >= CaptureConfig.MAX_PENDING_SAVES
 
     // 이하 saveExecutor 전용
-    private var segment: Segment? = null
+    private var visit: Visit? = null
 
-    /** 중복 생략 기준: 직전에 저장한 이미지(스크롤 프레임은 스크롤 이미지로 저장되므로 포함). */
-    private var lastSaved: Saved? = null
+    /** 상태는 끝났지만 아직 이미지로 저장 중인 수. */
+    private var savingGroups = 0
 
-    /** 직전에 찍은 화면(저장 생략된 것 포함). 스크롤을 시작하면 이어붙이기의 시작 프레임이 된다. */
-    private var lastFrame: Frame? = null
-    private var frameIds = 0L
-
-    /** 화면 방문 1번. 첫 저장 때 [record] 를 만들고 순번을 준다. */
-    private class Segment(val number: Int, val packageName: String, val className: String, val enteredAt: Long) {
+    /** 화면 방문 1번. 첫 화면을 받을 때 [record] 를 만들고 순번을 준다. */
+    private class Visit(val number: Int, val packageName: String, val className: String, val enteredAt: Long) {
         var record: ScreenRecord? = null
-        var captureNo = 0
-        var scroll: ScrollFrames? = null
+        var group: Group? = null
+        var groupNo = 0
+
+        /** 이 방문에서 저장한 이미지 수(stitchExecutor 전용). 파일 이름 번호에 쓴다. */
+        var files = 0
     }
 
-    /** 이 방문의 이어붙이기 임시 프레임. */
-    private class ScrollFrames(val dir: File) {
+    /** 화면 상태 1개 = 결과 이미지 1장(이어붙이지 못하면 여러 장). */
+    private class Group(val dir: File, val startedAt: Long) {
         var count = 0
-        var lastFrameId = -1L
+        var lastHint: Int? = null
     }
 
-    private class Saved(val segment: Segment, val uri: Uri?, val capture: CaptureRecord?, val thumb: FrameDiff.Thumb)
-
-    private class Frame(val segment: Segment, val id: Long, val bitmap: Bitmap)
+    private class SavedFile(val name: String, val frames: Int)
 
     init {
         val now = System.currentTimeMillis()
@@ -108,32 +92,32 @@ class SessionRecorder(
         saveExecutor.execute { store.writeSession(s) }
     }
 
-    /** 새 화면 구간을 연다. 이전 구간은 닫는다(이어붙이던 프레임이 있으면 스크롤 이미지 저장). */
+    /** 새 화면 방문을 연다. 이전 방문의 상태는 이미지로 저장한다. */
     fun enterScreen(packageName: String, className: String) {
         currentSegment++
         val number = currentSegment
         val at = System.currentTimeMillis()
         onSaveThread {
-            closeSegment(at)
-            segment = Segment(number, packageName, className, at)
+            closeVisit(at)
+            visit = Visit(number, packageName, className, at)
             log.write(at, "화면", "$packageName / $className")
         }
     }
 
     /**
-     * 촬영 1장. 버퍼 소유권을 넘겨받는다(처리 후 close).
-     * @param scrollDy 직전 촬영 이후 scrollDeltaY 합(모르면 null). [Kind.SCROLL] 의 겹침 계산 힌트.
+     * 확정한 화면 1장. Bitmap 소유권을 넘겨받는다(임시 저장 후 recycle).
+     * @param scrollDy [Op.SCROLL] 일 때 직전 화면 이후 scrollDeltaY 합(모르면 null). 이어붙일 때 겹침 힌트.
      */
-    fun addCapture(buffer: HardwareBuffer, colorSpace: ColorSpace?, kind: Kind, scrollDy: Int?) {
+    fun addFrame(bitmap: Bitmap, op: Op, scrollDy: Int?) {
         val at = System.currentTimeMillis()
         pending.incrementAndGet()
         saveExecutor.execute {
             try {
-                processCapture(buffer, colorSpace, kind, scrollDy, at)
+                processFrame(bitmap, op, scrollDy, at)
             } catch (e: Exception) {
-                Log.e(TAG, "캡처 저장 실패", e)
+                Log.e(TAG, "화면 저장 실패", e)
             } finally {
-                buffer.close()
+                bitmap.recycle()
                 pending.decrementAndGet()
             }
         }
@@ -148,14 +132,12 @@ class SessionRecorder(
         }
     }
 
-    /** 세션을 끝낸다. 남은 저장(스크롤 이미지 포함)이 모두 끝나면 [onDone] 을 (저장한 이미지 수와 함께) 메인 스레드에서 부른다. */
+    /** 세션을 끝낸다. 남은 저장이 모두 끝나면 [onDone] 을 (저장한 이미지 수와 함께) 메인 스레드에서 부른다. */
     fun stop(reason: String, onDone: (savedImages: Int) -> Unit) {
         val at = System.currentTimeMillis()
         onSaveThread {
-            closeSegment(at)
-            lastFrame?.bitmap?.recycle()
-            lastFrame = null
-            // 예약된 스크롤 이미지 작업이 끝나고 그 결과가 반영된 뒤에 마무리한다
+            closeVisit(at)
+            // 예약된 이미지 저장이 끝나고 그 결과가 반영된 뒤에 마무리한다
             stitchExecutor.execute {
                 onSaveThread {
                     try {
@@ -176,147 +158,81 @@ class SessionRecorder(
 
     // ── saveExecutor ──────────────────────────────────────────────
 
-    private fun processCapture(buffer: HardwareBuffer, colorSpace: ColorSpace?, kind: Kind, scrollDy: Int?, at: Long) {
-        val seg = segment ?: return
-        var hardware: Bitmap? = null
-        var software: Bitmap? = null
-        try {
-            hardware = Bitmap.wrapHardwareBuffer(buffer, colorSpace) ?: return
-            software = hardware.copy(Bitmap.Config.ARGB_8888, false) ?: return
-            hardware.recycle()
-            hardware = null
-            val thumb = thumbnail(software)
-            val id = ++frameIds
-            if (kind == Kind.SCROLL) {
-                addScrollFrame(seg, software, thumb, scrollDy, id)
-            } else {
-                saveIfChanged(seg, software, thumb, kind == Kind.FINAL, at)
+    private fun processFrame(bitmap: Bitmap, op: Op, scrollDy: Int?, at: Long) {
+        val v = visit ?: return
+        val g = v.group
+        when {
+            op == Op.REPLACE && g != null -> store.writeFrame(g.dir, g.count - 1, g.lastHint, bitmap)
+            op == Op.SCROLL && g != null -> {
+                store.writeFrame(g.dir, g.count, scrollDy, bitmap)
+                g.count++
+                g.lastHint = scrollDy
             }
-            // 다음 스크롤의 시작 프레임으로 들고 있는다(직전 것은 해제)
-            lastFrame?.bitmap?.recycle()
-            lastFrame = Frame(seg, id, software)
-            software = null
-        } finally {
-            software?.recycle()
-            hardware?.recycle()
-        }
-    }
-
-    private fun thumbnail(bitmap: Bitmap): FrameDiff.Thumb {
-        val w = bitmap.width
-        val h = bitmap.height
-        val top = topInset.coerceIn(0, h / 3)
-        val bottom = h - bottomInset.coerceIn(0, h / 3)
-        return FrameDiff.thumbnail(w, top, bottom) { y, count, into -> bitmap.getPixels(into, 0, w, 0, y, w, count) }
-    }
-
-    private fun saveIfChanged(seg: Segment, bitmap: Bitmap, thumb: FrameDiff.Thumb, final: Boolean, at: Long) {
-        val prev = lastSaved
-        if (prev != null) {
-            if (final) {
-                // 최종 화면이 직전 저장 이미지와 같으면 그 파일을 최종으로 표시한다
-                if (prev.segment === seg && FrameDiff.same(prev.thumb, thumb) && (prev.capture?.final == true || markFinal(prev, at))) return
-            } else if (FrameDiff.similar(prev.thumb, thumb)) {
-                return // 직전 저장 이미지와 거의 같음
+            else -> {
+                closeGroup(v)
+                val record = v.record ?: ScreenRecord(session.screens.size + 1, v.packageName, v.className, v.enteredAt).also {
+                    session.screens += it
+                    v.record = it
+                    store.writeSession(session)
+                }
+                v.groupNo++
+                val group = Group(store.groupDir(session.id, v.number, v.groupNo), at)
+                store.writeGroupInfo(group.dir, GroupInfo(record.seq, baseName(record)))
+                store.writeFrame(group.dir, 0, null, bitmap)
+                group.count = 1
+                v.group = group
+                notifyCount()
             }
         }
-        save(seg, bitmap, thumb, final, at)
     }
 
-    private fun save(seg: Segment, bitmap: Bitmap, thumb: FrameDiff.Thumb, final: Boolean, at: Long) {
-        // 화면 순번은 그 방문에서 처음 저장할 때 정한다(저장한 게 없는 방문은 순번을 쓰지 않음)
-        val record = seg.record ?: newRecord(seg)
-        val name = String.format(Locale.ROOT, "%s_%02d%s.png", baseName(record), seg.captureNo + 1, if (final) FINAL_SUFFIX else "")
-        val uri = store.savePng(EvidenceStore.sessionPath(session.id), name, bitmap)
-        attach(seg, record)
-        seg.captureNo++
-        val capture = CaptureRecord(name, at, final)
-        record.captures += capture
-        lastSaved = Saved(seg, uri, capture, thumb)
-        store.writeSession(session)
-        log.write(at, if (final) "최종 캡처" else "캡처", name)
-        notifySaved()
-    }
-
-    /** 직전 저장 이미지 이름에 _final 을 붙인다. 실패하거나 파일이 아니면(스크롤 프레임) false → 새로 저장한다. */
-    private fun markFinal(prev: Saved, at: Long): Boolean {
-        val capture = prev.capture ?: return false
-        val uri = prev.uri ?: return false
-        val name = capture.file.removeSuffix(".png") + "$FINAL_SUFFIX.png"
-        if (!store.rename(uri, name)) return false
-        capture.file = name
-        capture.final = true
-        store.writeSession(session)
-        log.write(at, "최종 캡처", "$name (직전 캡처와 같아 이름만 변경)")
-        return true
-    }
-
-    /** 스크롤 프레임을 임시 폴더에 넣는다. 스크롤 직전 화면이 아직 없으면 먼저 시작 프레임으로 넣는다. */
-    private fun addScrollFrame(seg: Segment, bitmap: Bitmap, thumb: FrameDiff.Thumb, dy: Int?, id: Long) {
-        val frames = seg.scroll ?: run {
-            val record = seg.record ?: newRecord(seg).also { attach(seg, it) }
-            store.writeSession(session)
-            ScrollFrames(store.scrollDir(session.id, seg.number)).also {
-                store.writeScrollInfo(it.dir, ScrollInfo(record.seq, baseName(record)))
-                seg.scroll = it
-            }
-        }
-        val base = lastFrame
-        if (base != null && base.segment === seg && base.id != frames.lastFrameId) {
-            store.writeScrollFrame(frames.dir, frames.count++, null, true, base.bitmap)
-        }
-        store.writeScrollFrame(frames.dir, frames.count++, dy, false, bitmap)
-        frames.lastFrameId = id
-        // 이 프레임은 스크롤 이미지로 저장되므로, 같은 화면을 다시 개별 저장하지 않게 중복 생략 기준으로 삼는다
-        lastSaved = Saved(seg, null, null, thumb)
-    }
-
-    private fun newRecord(seg: Segment) =
-        ScreenRecord(session.screens.size + 1, seg.packageName, seg.className, seg.enteredAt)
-
-    private fun attach(seg: Segment, record: ScreenRecord) {
-        if (seg.record != null) return
-        session.screens += record
-        seg.record = record
-    }
-
-    private fun closeSegment(exitedAt: Long) {
-        val seg = segment ?: return
-        segment = null
-        val record = seg.record ?: return // 저장한 것이 없는 방문
-        record.exitedAt = exitedAt
-        store.writeSession(session)
-        val frames = seg.scroll ?: return
+    /** 현재 상태를 끝내고 이미지로 저장한다(stitchExecutor). */
+    private fun closeGroup(v: Visit) {
+        val g = v.group ?: return
+        v.group = null
+        val record = v.record ?: return
         val base = baseName(record)
         val path = EvidenceStore.sessionPath(session.id)
+        savingGroups++
         stitchExecutor.execute {
-            val names = try {
-                saveScroll(store, frames.dir, path, base, topInset, bottomInset).also { frames.dir.deleteRecursively() }
+            val files = try {
+                saveGroup(store, g.dir, path, topInset, bottomInset) { if (v.files++ == 0) "$base.png" else "${base}_${v.files}.png" }
+                    .also { g.dir.deleteRecursively() }
             } catch (e: Exception) {
                 // 임시 프레임은 남겨 두고 다음 서비스 연결 때 다시 시도한다
-                Log.e(TAG, "스크롤 이미지 저장 실패: $base", e)
+                Log.e(TAG, "이미지 저장 실패: $base", e)
                 emptyList()
             }
-            if (names.isNotEmpty()) {
-                onSaveThread {
-                    record.scroll = record.scroll + names
-                    store.writeSession(session)
-                    for (n in names) log.write(System.currentTimeMillis(), "스크롤 이미지", n)
-                    notifySaved()
+            onSaveThread {
+                savingGroups--
+                for (f in files) {
+                    record.captures += CaptureRecord(f.name, g.startedAt, f.frames)
+                    log.write(System.currentTimeMillis(), "저장", if (f.frames > 1) "${f.name} (화면 ${f.frames}장 이어붙임)" else f.name)
                 }
+                if (files.isNotEmpty()) store.writeSession(session)
+                notifyCount()
             }
         }
     }
 
-    private fun notifySaved() {
+    private fun closeVisit(exitedAt: Long) {
+        val v = visit ?: return
+        visit = null
+        closeGroup(v)
+        val record = v.record ?: return // 확보한 화면이 없는 방문
+        record.exitedAt = exitedAt
+        store.writeSession(session)
+    }
+
+    /** 저장한 이미지 + 저장 중 + 지금 만드는 상태. 플로팅 버튼 숫자. */
+    private fun notifyCount() {
         val id = session.id
-        val saved = session.imageCount
-        main.post { onSaved(id, saved) }
+        val count = session.imageCount + savingGroups + (if (visit?.group != null) 1 else 0)
+        main.post { onSaved(id, count) }
     }
 
     companion object {
         private const val TAG = "SessionRecorder"
-        private const val FINAL_SUFFIX = "_final"
 
         private val saveExecutor = Executors.newSingleThreadExecutor { Thread(it, "qa-save") }
         private val stitchExecutor = Executors.newSingleThreadExecutor { Thread(it, "qa-stitch") }
@@ -340,21 +256,27 @@ class SessionRecorder(
             EvidenceStore.baseName(record.seq, record.packageName, record.className, record.enteredAt)
 
         /**
-         * 임시 폴더의 프레임을 순서대로 이어붙여 …_scroll.png(…_scroll2.png …)로 저장하고 파일 이름을 돌려준다.
-         * 겹침을 못 찾은 지점과 MAX_STITCH_HEIGHT 를 넘는 지점에서 다음 장으로 나눈다.
-         * 스크롤 직전 화면(이미 개별 캡처됨)만으로 된 장은 만들지 않는다.
+         * 임시 폴더의 프레임을 순서대로 이어붙여 저장하고 (파일 이름, 이어붙인 화면 수)를 돌려준다.
+         * 프레임이 1장이면 그대로, 여러 장이면 겹치는 부분으로 이어붙인 긴 이미지 1장.
+         * 겹침을 못 찾은 지점과 MAX_STITCH_HEIGHT 를 넘는 지점에서는 다음 장으로 나눈다.
          */
-        private fun saveScroll(store: EvidenceStore, dir: File, path: String, base: String, topInset: Int, bottomInset: Int): List<String> {
-            val names = ArrayList<String>()
+        private fun saveGroup(
+            store: EvidenceStore,
+            dir: File,
+            path: String,
+            topInset: Int,
+            bottomInset: Int,
+            nextName: () -> String,
+        ): List<SavedFile> {
+            val saved = ArrayList<SavedFile>()
             EvidenceStore.FrameReader().use { reader ->
                 // 1) 프레임마다 행 해시만 남긴다(픽셀 배열은 재사용)
                 val frames = ArrayList<Stitcher.Frame>()
                 val files = ArrayList<File>()
                 val hints = ArrayList<Int?>()
-                val isBase = ArrayList<Boolean>()
                 var buffer: IntArray? = null
                 var skipped = false
-                for (f in store.listScrollFrames(dir)) {
+                for (f in store.listFrames(dir)) {
                     val px = reader.read({ f.file.inputStream() }, buffer)
                     if (px == null) {
                         skipped = true // 읽지 못한 프레임 다음은 이동량을 모른다
@@ -364,57 +286,63 @@ class SessionRecorder(
                     frames += Stitcher.Frame(reader.width, reader.height, Stitcher.rowHashes(px, reader.width, reader.height))
                     files += f.file
                     hints += if (skipped) null else f.hint
-                    isBase += f.base
                     skipped = false
                 }
-                if (frames.isEmpty()) return names
+                if (frames.isEmpty()) return saved
 
-                // 2) 합성 계획 → 장마다 행 단위로 PNG 렌더링
-                val parts = Stitcher.plan(frames, topInset, bottomInset, hints).parts
-                    .filter { part -> part.slices.any { !isBase[it.frame] } }
-                parts.forEachIndexed { i, part ->
-                    val name = if (i == 0) "${base}_scroll.png" else "${base}_scroll${i + 1}.png"
+                // 2) 합성 계획 → 장마다 저장. 한 프레임 전체면 임시 PNG 를 그대로 복사한다.
+                for (part in Stitcher.plan(frames, topInset, bottomInset, hints).parts) {
+                    val name = nextName()
+                    val only = part.slices.singleOrNull()
                     store.saveFile(path, name, "image/png") { out ->
-                        renderPart(part, out) { frame, into ->
-                            val px = reader.read({ files[frame].inputStream() }, into)
-                                ?: throw IOException("임시 프레임을 읽을 수 없습니다: ${files[frame].name}")
-                            if (px !== into) px.copyInto(into)
+                        if (only != null && only.top == 0 && only.bottom == part.frameHeight) {
+                            files[only.frame].inputStream().use { it.copyTo(out) }
+                        } else {
+                            renderPart(part, out) { frame, into ->
+                                val px = reader.read({ files[frame].inputStream() }, into)
+                                    ?: throw IOException("임시 프레임을 읽을 수 없습니다: ${files[frame].name}")
+                                if (px !== into) px.copyInto(into)
+                            }
                         }
                     }
-                    names += name
+                    saved += SavedFile(name, part.slices.map { it.frame }.distinct().size)
                 }
             }
-            return names
+            return saved
         }
 
         /**
-         * 서비스가 비정상 종료돼 끝나지 않은 세션을 닫고, 남은 스크롤 프레임을 스크롤 이미지로 저장한다.
-         * 변화·최종 캡처는 찍을 때마다 저장되므로 기록만 정리한다. 서비스가 연결될 때 한 번 부른다.
+         * 서비스가 비정상 종료돼 끝나지 않은 세션을 닫고, 남은 임시 프레임을 이미지로 저장한다.
+         * 서비스가 연결될 때 한 번 부른다.
          */
         fun recoverUnfinished(context: Context, topInset: Int, bottomInset: Int) {
             val store = EvidenceStore(context)
-            // 앞서 예약된 스크롤 이미지 작업이 끝난 뒤에 남은 것만 처리한다
+            // 앞서 예약된 저장이 끝난 뒤에 남은 것만 처리한다
             stitchExecutor.execute {
                 onSaveThread {
                     for (s in store.loadSessions()) {
                         if (s.id == activeSessionId) continue
                         var changed = false
-                        for (dir in store.pendingScrollDirs(s.id)) {
-                            val info = store.readScrollInfo(dir)
-                            val names = if (info == null) {
+                        for (dir in store.pendingGroupDirs(s.id)) {
+                            val info = store.readGroupInfo(dir)
+                            val record = s.screens.firstOrNull { it.seq == info?.seq }
+                            val at = dir.lastModified()
+                            val files = if (info == null || record == null) {
                                 emptyList()
                             } else {
+                                var n = 0
                                 try {
-                                    saveScroll(store, dir, EvidenceStore.sessionPath(s.id), info.base, topInset, bottomInset)
+                                    saveGroup(store, dir, EvidenceStore.sessionPath(s.id), topInset, bottomInset) {
+                                        if (n++ == 0) "${info.base}_recovered.png" else "${info.base}_recovered$n.png"
+                                    }
                                 } catch (e: Exception) {
-                                    Log.e(TAG, "스크롤 이미지 복구 실패: ${dir.path}", e)
+                                    Log.e(TAG, "이미지 복구 실패: ${dir.path}", e)
                                     emptyList()
                                 }
                             }
                             dir.deleteRecursively() // 복구는 한 번만 시도한다
-                            val record = s.screens.firstOrNull { it.seq == info?.seq }
-                            if (record != null && names.isNotEmpty()) {
-                                record.scroll = record.scroll + names
+                            if (record != null && files.isNotEmpty()) {
+                                for (f in files) record.captures += CaptureRecord(f.name, at, f.frames)
                                 changed = true
                             }
                         }
