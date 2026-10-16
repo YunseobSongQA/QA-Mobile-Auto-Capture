@@ -1,6 +1,7 @@
 package com.qa.autocapture.capture.policy
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -41,6 +42,51 @@ class ScrollTimerTest {
     }
 
     @Test
+    fun `스크롤하는 동안 이동량이 쌓일 때마다 중간 프레임 1장`() {
+        val t = ScrollTimer()
+        val step = 800
+        fun eval(now: Long) = t.evaluate(now, scrollSettle, scrollMax, step, CaptureConfig.SCROLL_STEP_MS)
+        t.onScroll(0, 300)
+        assertEquals(ScrollTimer.Decision.Wait(scrollSettle), eval(0))
+        t.onScroll(100, 300)
+        assertEquals(ScrollTimer.Decision.Wait(100 + scrollSettle), eval(100))
+        t.onScroll(200, -300) // 방향과 상관없이 이동량을 센다
+        assertEquals(ScrollTimer.Decision.Step, eval(200))
+        assertEquals("찍기 전에는 다시 요청하지 않음", ScrollTimer.Decision.Wait(200 + scrollSettle), eval(200))
+        t.onStepTaken(250)
+        t.onScroll(300, 300)
+        assertEquals(ScrollTimer.Decision.Wait(300 + scrollSettle), eval(300))
+        assertEquals(ScrollTimer.Decision.Capture, eval(300 + scrollSettle))
+        assertFalse(t.active)
+    }
+
+    @Test
+    fun `이동량을 모르는 스크롤은 SCROLL_STEP_MS 마다 중간 프레임`() {
+        val t = ScrollTimer()
+        val stepMs = CaptureConfig.SCROLL_STEP_MS
+        val steps = mutableListOf<Long>()
+        var now = 0L
+        while (now <= 1000) {
+            t.onScroll(now, null)
+            if (t.evaluate(now, scrollSettle, scrollMax, 800, stepMs) == ScrollTimer.Decision.Step) {
+                steps += now
+                t.onStepTaken(now)
+            }
+            now += 50
+        }
+        assertEquals(listOf(stepMs, 2 * stepMs), steps)
+    }
+
+    @Test
+    fun `중간 프레임을 못 찍으면 다음 판단 때 다시 요청한다`() {
+        val t = ScrollTimer()
+        t.onScroll(0, 900)
+        assertEquals(ScrollTimer.Decision.Step, t.evaluate(0, scrollSettle, scrollMax, 800, CaptureConfig.SCROLL_STEP_MS))
+        t.onStepDropped()
+        assertEquals(ScrollTimer.Decision.Step, t.evaluate(10, scrollSettle, scrollMax, 800, CaptureConfig.SCROLL_STEP_MS))
+    }
+
+    @Test
     fun `취소하면 프레임을 찍지 않는다`() {
         assertTrue(runScroll(listOf(Scroll(0), Scroll(200), CancelScroll(300))).isEmpty())
     }
@@ -69,7 +115,7 @@ class ScrollTimerTest {
             when (val d = timer.evaluate(now, scrollSettle, scrollMax)) {
                 is ScrollTimer.Decision.Wait -> check = d.at.also { assertTrue("재판단 시각은 미래여야 함", it > now) }
                 ScrollTimer.Decision.Capture -> shots += now
-                ScrollTimer.Decision.Idle -> Unit
+                ScrollTimer.Decision.Step, ScrollTimer.Decision.Idle -> Unit
             }
         }
 

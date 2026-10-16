@@ -15,7 +15,8 @@ import java.util.concurrent.RejectedExecutionException
 /**
  * 촬영 큐. 한 번에 1장만, takeScreenshot 최소 간격(MIN_SHOT_INTERVAL_MS)을 지켜 찍는다. 메인 스레드 전용.
  *
- * - 비교용(PROBE)은 플로팅 버튼을 그대로 두고 찍는다. 그 외(저장될 수 있는 화면)는 버튼을 숨기고 HIDE_SETTLE_MS 뒤에 찍는다.
+ * - 비교용(PROBE)은 플로팅 버튼을 그대로 두고 찍는다. 그 외(저장될 수 있는 화면)는 버튼을 숨기고 HIDE_SETTLE_MS 뒤에 찍는다
+ *   (스크롤하는 동안처럼 이미 숨겨져 있으면 기다리지 않는다).
  * - 찍은 화면은 별도 스레드에서 ARGB Bitmap 과 비교용 축소 이미지로 바꿔 [Callback.onAnalyzed] 로 돌려준다.
  *   비교용은 축소 이미지만 남기고 Bitmap 은 바로 해제한다.
  * - 대기 중인 요청은 1개뿐이다. 새 요청이 오면 바꾼다.
@@ -36,15 +37,15 @@ class ScreenshotTaker(
         /** 정지 확인 뒤 저장용(버튼 숨김). */
         FINAL,
 
-        /** 스크롤이 멈춘 화면(버튼 숨김, 이어붙임). */
+        /** 스크롤 중·멈춘 화면(버튼 숨김, 이어붙임). */
         SCROLL,
     }
 
     /**
-     * 찍을 것. [generation] = SettleCycle 의 판단 번호(스크롤은 0).
+     * 찍을 것. [generation] = SettleCycle 의 판단 번호(스크롤은 0). [step] = 스크롤하는 중의 중간 프레임(SCROLL).
      * [recorder]·[segment]·[scrollDy] 는 찍는 순간 [Callback.onBeforeShot] 이 채운다.
      */
-    class Request(val purpose: Purpose, val generation: Int) {
+    class Request(val purpose: Purpose, val generation: Int, val step: Boolean = false) {
         var recorder: Any? = null
         var segment = 0
         var scrollDy: Int? = null
@@ -125,7 +126,8 @@ class ScreenshotTaker(
             return
         }
         shooting = true
-        val hide = if (s.purpose == Purpose.PROBE) 0 else CaptureConfig.HIDE_SETTLE_MS
+        // 버튼을 숨겨야 하면 숨긴 뒤 HIDE_SETTLE_MS 를 기다리는 만큼 먼저 준비한다
+        val hide = if (s.purpose == Purpose.PROBE || overlay.hiddenSince != 0L) 0 else CaptureConfig.HIDE_SETTLE_MS
         handler.postAtTime(prepare, maxOf(SystemClock.uptimeMillis(), lastShotAt + CaptureConfig.MIN_SHOT_INTERVAL_MS - hide))
     }
 
@@ -137,10 +139,11 @@ class ScreenshotTaker(
         }
         if (s.purpose == Purpose.PROBE) {
             takeShot()
-        } else {
-            overlay.hideForCapture()
-            handler.postDelayed(shoot, CaptureConfig.HIDE_SETTLE_MS)
+            return
         }
+        overlay.hide(FloatingButton.Hide.CAPTURE)
+        val readyAt = overlay.hiddenSince + CaptureConfig.HIDE_SETTLE_MS
+        if (readyAt > SystemClock.uptimeMillis()) handler.postAtTime(shoot, readyAt) else takeShot()
     }
 
     private fun takeShot() {
@@ -179,7 +182,7 @@ class ScreenshotTaker(
     private fun finishShot() {
         shooting = false
         inFlight = false
-        overlay.restoreAfterCapture()
+        overlay.show(FloatingButton.Hide.CAPTURE)
     }
 
     /** 별도 스레드에서 HardwareBuffer → ARGB_8888 Bitmap → 축소 이미지. 결과는 메인 스레드로. */

@@ -8,6 +8,12 @@ object CaptureConfig {
     /** 화면 이벤트가 이만큼 없으면 "조용해짐"으로 보고 정지 확인을 시작한다. */
     const val SETTLE_MS = 1000L
 
+    /**
+     * 이벤트가 계속 와도(배너·타이머·로딩 표시가 이벤트를 쉬지 않고 보내는 앱) 시작 후 SETTLE_MS + 이만큼 지나면
+     * 더 기다리지 않고 화면 비교만으로 완성 여부를 판단한다.
+     */
+    const val QUIET_WAIT_EXTRA_MS = 1000L
+
     /** 정지 확인: 이 간격을 두고 찍은 두 화면이 같아야 "정적으로 완성됨"으로 본다. */
     const val CONFIRM_MS = 500L
 
@@ -27,6 +33,9 @@ object CaptureConfig {
      * 정지 확인으로 완성된 화면을 찍으면 이 1장을 대신한다.
      */
     const val ENTRY_PREVIEW_MS = 400L
+
+    /** 화면에 들어온 뒤 이벤트가 계속 와도 이만큼 지나면 미리 1장을 확보한다. */
+    const val ENTRY_PREVIEW_MAX_MS = 1000L
 
     /** 앱이 스스로 바뀐 경우(터치 없음) 이 비율 이상 바뀌어야 새 화면으로 보고 찍는다(배너·시계 무시). */
     const val PAGE_CHANGE_RATIO = 0.3
@@ -71,6 +80,18 @@ object CaptureConfig {
     /** 스크롤이 멈춘 뒤 내용 변경이 계속돼도(이미지 로딩, 배너) 마지막 스크롤 이벤트 후 이만큼 지나면 찍는다. */
     const val SCROLL_MAX_WAIT_MS = 1500L
 
+    /**
+     * 스크롤하는 동안에도 이동량(scrollDeltaY 합)이 화면 높이의 이 비율을 넘을 때마다 1장을 찍는다.
+     * 한 번에 화면 높이보다 많이 넘겨도 프레임끼리 겹치게 해서 한 장으로 이어붙이기 위함이다.
+     */
+    const val SCROLL_STEP_RATIO = 0.35
+
+    /** 스크롤한 영역의 높이가 화면 높이의 이 비율보다 작으면(뉴스 티커, 작은 목록) 이어붙이지 않고 내용 변경으로 본다. */
+    const val SCROLL_MIN_HEIGHT_RATIO = 0.3
+
+    /** 이동량을 알려 주지 않는 스크롤(일부 앱·웹뷰)은 스크롤하는 동안 이 간격마다 1장. */
+    const val SCROLL_STEP_MS = 450L
+
     /** 이어붙인 이미지 1장의 최대 높이(px). 넘으면 프레임 경계에서 다음 장으로 나눈다. */
     const val MAX_STITCH_HEIGHT = 20_000
 
@@ -91,4 +112,7 @@ object CaptureConfig {
 
     /** 겹침을 못 찾았어도 바뀐 행이 이 비율 이하이면 같은 위치(시계·커서 변화)로 보고 버린다. */
     const val STITCH_SAME_MAX_CHANGED_RATIO = 0.15
+
+    /** 겹침을 끝내 못 찾은 곳(너무 빠른 스크롤)은 파일을 나누지 않고 이 높이(px)의 구분선을 넣어 한 장으로 잇는다. */
+    const val STITCH_GAP_HEIGHT = 48
 }

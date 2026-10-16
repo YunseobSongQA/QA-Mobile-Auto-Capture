@@ -74,13 +74,20 @@ class StitcherTest {
     }
 
     @Test
-    fun `겹침이 없으면 part 로 분리된다`() {
+    fun `겹침이 없으면 파일을 나누지 않고 구분선을 넣어 한 장으로 잇는다`() {
         val offsets = listOf(0, 200, 380, 1800, 2000)
         val result = stitch(offsets.map { frame(it) })
-        assertEquals("split", result.plan.result)
-        assertEquals(2, result.images.size)
-        assertImage(expected(0, 380), result.images[0])
-        assertImage(expected(1800, 2000), result.images[1])
+        assertEquals("gap", result.plan.result)
+        assertImage(expectedWithGap(0, 380, 1800, 2000), result.images.single())
+    }
+
+    @Test
+    fun `프레임 1장만 어긋나면(오버스크롤로 늘어난 순간) 그 프레임만 버리고 잇는다`() {
+        val noise = Random(7).let { rnd -> IntArray(w * h) { 0xFF000000.toInt() or rnd.nextInt(0xFFFFFF) } }
+        val frames = listOf(frame(0), frame(150), noise, frame(300), frame(450))
+        val result = stitch(frames)
+        assertEquals("ok", result.plan.result)
+        assertImage(expected(0, 450), result.images.single())
     }
 
     @Test
@@ -187,13 +194,11 @@ class StitcherTest {
     }
 
     @Test
-    fun `힌트가 있어도 겹침이 없으면 억지로 붙이지 않고 나눈다`() {
+    fun `힌트가 있어도 겹침이 없으면 억지로 붙이지 않고 구분선을 넣는다`() {
         val offsets = listOf(0, 200, 380, 1800, 2000)
         val result = stitch(offsets.map { frame(it) }, hints = deltas(offsets))
-        assertEquals("split", result.plan.result)
-        assertEquals(2, result.images.size)
-        assertImage(expected(0, 380), result.images[0])
-        assertImage(expected(1800, 2000), result.images[1])
+        assertEquals("gap", result.plan.result)
+        assertImage(expectedWithGap(0, 380, 1800, 2000), result.images.single())
     }
 
     // ── 고정 영역 판별 ───────────────────────────────────────────
@@ -249,6 +254,14 @@ class StitcherTest {
     /** 콘텐츠 [first .. last+viewH) 를 헤더/푸터로 감싼 기대 이미지. */
     private fun expected(first: Int, last: Int): Image {
         val px = compose(listOf(header, content.copyRows(first, last + viewH), footer))
+        return Image(w, px.size / w, px)
+    }
+
+    /** 콘텐츠 [first .. last+viewH) + 구분선 + [first2 .. last2+viewH) 를 헤더/푸터로 감싼 기대 이미지. */
+    private fun expectedWithGap(first: Int, last: Int, first2: Int, last2: Int): Image {
+        val gapH = CaptureConfig.STITCH_GAP_HEIGHT
+        val gap = IntArray(w * gapH).also { px -> for (y in 0 until gapH) gapRow(w, y, gapH).copyInto(px, y * w) }
+        val px = compose(listOf(header, content.copyRows(first, last + viewH), gap, content.copyRows(first2, last2 + viewH), footer))
         return Image(w, px.size / w, px)
     }
 

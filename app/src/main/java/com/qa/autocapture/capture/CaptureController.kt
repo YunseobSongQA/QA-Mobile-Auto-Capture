@@ -19,13 +19,15 @@ import com.qa.autocapture.storage.Options
  *
  * - 찍는 때(중요한 때만): 화면 진입, 터치·길게 누르기·입력, 스크롤 멈춤.
  *   앱이 스스로 바뀐 것(배너, 시계, 애니메이션)은 화면 대부분이 바뀌었을 때만.
- * - 찍는 화면: 정적으로 완성된 화면(SettleCycle). 스크롤은 멈출 때마다 1장(ScrollTimer)을 같은 상태에 덧붙인다.
+ * - 찍는 화면: 정적으로 완성된 화면(SettleCycle).
+ * - 스크롤: 스크롤하는 동안 플로팅 버튼을 숨겨 두고, 일정 거리마다·멈출 때마다 1장(ScrollTimer)을 같은 상태에 덧붙인다
+ *   → 화면 상태가 끝나면 한 장으로 이어붙는다.
  * - 화면 상태: 작은 변화는 그 상태 이미지를 최신 화면으로 바꾸고, 뚜렷이 바뀌면 새 이미지([deliver]).
  * 판단 규칙은 DESIGN.md 3장.
  */
 class CaptureController(
     private val handler: Handler,
-    overlay: FloatingButton,
+    private val overlay: FloatingButton,
     service: AccessibilityService,
     private val options: Options,
     private val debug: (tag: String, message: String) -> Unit,
@@ -34,6 +36,9 @@ class CaptureController(
     private val taker = ScreenshotTaker(service, handler, overlay, this)
     private val cycle = SettleCycle()
     private val scrollTimer = ScrollTimer()
+
+    /** 스크롤 중간 프레임을 찍을 이동량(px). */
+    private val scrollStepPx = (service.resources.displayMetrics.heightPixels * CaptureConfig.SCROLL_STEP_RATIO).toInt()
 
     private var recorder: SessionRecorder? = null
 
@@ -136,12 +141,13 @@ class CaptureController(
             scrollDyKnown = true
         }
         if (!scrollTimer.active) {
-            // 스크롤 중에는 정지 확인을 멈추고 멈출 때까지 기다린다
+            // 스크롤 중에는 정지 확인을 멈추고, 버튼을 숨겨 둔 채(깜빡임 없음) 중간·멈춘 화면만 찍는다
             debug("#SCROLL", "start")
             stopCycle()
+            overlay.hide(FloatingButton.Hide.SCROLL)
         }
-        scrollTimer.onScroll(SystemClock.uptimeMillis())
-        if (!scrollCheckPending) checkScroll()
+        scrollTimer.onScroll(SystemClock.uptimeMillis(), if (dy != 0) dy else null)
+        checkScroll() // 이동량이 쌓였으면 바로 중간 프레임
     }
 
     fun onToast(pkg: String, text: String) {
@@ -178,6 +184,7 @@ class CaptureController(
         taker.drop(Purpose.SCROLL)
         scrollDy = 0
         scrollDyKnown = false
+        overlay.show(FloatingButton.Hide.SCROLL)
     }
 
     private fun checkCycle() {
@@ -202,13 +209,21 @@ class CaptureController(
         }
     }
 
-    /** 스크롤이 멈췄는지 판단한다. 멈췄으면 이어붙일 프레임 1장을 요청한다. */
+    /** 스크롤 중간 프레임을 찍을 때인지, 스크롤이 멈췄는지 판단한다. 그때마다 이어붙일 프레임 1장을 요청한다. */
     private fun checkScroll() {
+        handler.removeCallbacks(scrollCheck)
+        scrollCheckPending = false
         if (recorder == null) return
-        when (val d = scrollTimer.evaluate(SystemClock.uptimeMillis(), CaptureConfig.SCROLL_SETTLE_MS, CaptureConfig.SCROLL_MAX_WAIT_MS)) {
+        val now = SystemClock.uptimeMillis()
+        when (val d = scrollTimer.evaluate(now, CaptureConfig.SCROLL_SETTLE_MS, CaptureConfig.SCROLL_MAX_WAIT_MS, scrollStepPx, CaptureConfig.SCROLL_STEP_MS)) {
             is ScrollTimer.Decision.Wait -> {
                 scrollCheckPending = true
                 handler.postAtTime(scrollCheck, d.at)
+            }
+            ScrollTimer.Decision.Step -> {
+                debug("#SCROLL", "step dy=${if (scrollDyKnown) scrollDy else "?"}")
+                want(ScreenshotTaker.Request(Purpose.SCROLL, 0, step = true))
+                checkScroll() // 멈춤 판단 타이머
             }
             ScrollTimer.Decision.Capture -> {
                 debug("#SCROLL", "stop dy=${if (scrollDyKnown) scrollDy else "?"}")
@@ -234,8 +249,11 @@ class CaptureController(
 
     override fun onBeforeShot(request: ScreenshotTaker.Request): Boolean {
         val rec = recorder ?: return false
-        // 스크롤이 다시 시작됐으면 멈출 때 다시 요청된다
-        if (request.purpose == Purpose.SCROLL && scrollTimer.active) return false
+        if (request.purpose == Purpose.SCROLL) {
+            // 멈춘 화면인데 스크롤이 다시 시작됐으면 멈출 때 다시 요청된다. 중간 프레임은 스크롤 중일 때만.
+            if (scrollTimer.active != request.step) return false
+            if (request.step) scrollTimer.onStepTaken(SystemClock.uptimeMillis())
+        }
         request.recorder = rec
         request.segment = rec.currentSegment
         if (request.purpose == Purpose.SCROLL) {
@@ -253,13 +271,23 @@ class CaptureController(
             scrollDyKnown = true
         }
         debug("#SHOT_FAIL", if (retrying) "retry" else request.purpose.name.lowercase())
-        if (!retrying && request.recorder === recorder && request.purpose != Purpose.SCROLL) {
-            cycle.onShotFailed(request.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
-            checkCycle()
+        if (retrying || request.recorder !== recorder) return
+        if (request.purpose == Purpose.SCROLL) {
+            if (request.step) {
+                scrollTimer.onStepDropped()
+                checkScroll()
+            } else if (!scrollTimer.active) {
+                overlay.show(FloatingButton.Hide.SCROLL)
+            }
+            return
         }
+        cycle.onShotFailed(request.generation, SystemClock.uptimeMillis(), CaptureConfig.CONFIRM_MS)
+        checkCycle()
     }
 
     override fun onAnalyzed(request: ScreenshotTaker.Request, thumb: FrameDiff.Thumb?, bitmap: Bitmap?, mask: FrameDiff.Box?) {
+        // 멈춘 화면을 찍었으면 버튼을 다시 보인다(그새 다시 스크롤하면 그대로 숨김)
+        if (request.purpose == Purpose.SCROLL && !request.step && !scrollTimer.active) overlay.show(FloatingButton.Hide.SCROLL)
         val rec = recorder
         if (rec == null || request.recorder !== rec || request.segment != rec.currentSegment || thumb == null) {
             bitmap?.recycle()
@@ -271,12 +299,10 @@ class CaptureController(
         }
         val now = SystemClock.uptimeMillis()
         if (request.purpose == Purpose.SCROLL) {
-            rec.addFrame(bitmap ?: return, SessionRecorder.Op.SCROLL, request.scrollDy)
-            lastThumb = thumb
-            lastIsPreview = false
-            debug("#FRAME", "scroll dy=${request.scrollDy ?: "?"}")
-            // 남은 로딩(이미지 등)이 끝나면 방금 프레임을 완성된 화면으로 바꾼다
-            startCycle(SettleCycle.Kind.COMPLETION)
+            keep(rec, bitmap ?: return, thumb, SessionRecorder.Op.SCROLL, request.scrollDy)
+            debug("#FRAME", "${if (request.step) "scroll-step" else "scroll"} dy=${request.scrollDy ?: "?"}")
+            // 멈춘 뒤 남은 로딩(이미지 등)이 끝나면 방금 프레임을 완성된 화면으로 바꾼다
+            if (!request.step && !scrollTimer.active) startCycle(SettleCycle.Kind.COMPLETION)
             return
         }
         val shot = when (request.purpose) {
@@ -287,8 +313,7 @@ class CaptureController(
         when (val o = cycle.onShot(request.generation, shot, thumb, mask, lastThumb, now, CaptureConfig.CONFIRM_MS)) {
             SettleCycle.Outcome.Preview -> {
                 if (bitmap != null && lastThumb == null) {
-                    rec.addFrame(bitmap, SessionRecorder.Op.NEW, null)
-                    lastThumb = thumb
+                    keep(rec, bitmap, thumb, SessionRecorder.Op.NEW, null)
                     lastIsPreview = true
                     debug("#FRAME", "preview")
                 } else {
@@ -314,8 +339,8 @@ class CaptureController(
             last == null -> SessionRecorder.Op.NEW
             lastIsPreview -> SessionRecorder.Op.REPLACE // 진입 직후 임시 화면은 완성된 화면으로 바꾼다
             kind == SettleCycle.Kind.CHANGE -> SessionRecorder.Op.NEW
-            kind == SettleCycle.Kind.COMPLETION ->
-                if (FrameDiff.changeRatio(last, thumb) < CaptureConfig.PAGE_CHANGE_RATIO) SessionRecorder.Op.REPLACE else SessionRecorder.Op.NEW
+            // 스크롤 멈춘 화면의 남은 로딩: 같은 스크롤 위치이므로 그 프레임을 완성된 화면으로 바꾼다(이어붙임 유지)
+            kind == SettleCycle.Kind.COMPLETION -> SessionRecorder.Op.REPLACE
             FrameDiff.similar(last, thumb) -> SessionRecorder.Op.REPLACE
             else -> SessionRecorder.Op.NEW
         }
@@ -325,12 +350,18 @@ class CaptureController(
             return
         }
         debug("#FRAME", "${op.name.lowercase()} ${kind.name.lowercase()}${if (forced) " forced" else ""}")
-        rec.addFrame(bitmap, op, null)
-        lastThumb = thumb
-        lastIsPreview = false
+        keep(rec, bitmap, thumb, op, null)
         if (op == SessionRecorder.Op.NEW) {
             scrollDy = 0
             scrollDyKnown = false
         }
+    }
+
+    /** 화면 1장을 화면 상태에 넣고(비교 기준으로 기억), 버튼에 확보 표시를 한다. */
+    private fun keep(rec: SessionRecorder, bitmap: Bitmap, thumb: FrameDiff.Thumb, op: SessionRecorder.Op, scrollDy: Int?) {
+        rec.addFrame(bitmap, op, scrollDy)
+        lastThumb = thumb
+        lastIsPreview = false
+        overlay.pulse()
     }
 }

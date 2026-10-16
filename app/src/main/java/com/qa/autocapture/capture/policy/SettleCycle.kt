@@ -4,11 +4,13 @@ package com.qa.autocapture.capture.policy
  * "정적으로 완성된 화면"을 1장 찍기 위한 판단. 시각과 비교 결과를 인자로 받는 순수 로직(JVM 단위 테스트).
  *
  * 1) 시작(화면 진입·터치·입력·스크롤 멈춤 뒤 확인·앱의 큰 변화) 후 이벤트가 settleMs 동안 없으면
+ *    — 이벤트가 계속 와도 시작 후 settleMs + QUIET_WAIT_EXTRA_MS 가 지나면 더 기다리지 않는다(바쁜 앱)
  * 2) 버튼을 숨기지 않고 비교용 화면(PROBE)을 찍어 이 화면의 마지막 확보 화면과 비교한다. 바뀐 게 없으면 끝.
  * 3) 바뀌었으면 confirmMs 뒤 버튼을 숨기고 저장용 화면(FINAL)을 찍어 직전 화면과 비교한다. 같으면 확정.
  *    다르면(아직 움직임) confirmMs 마다 PROBE 를 찍어 직전 것과 같아지면 다시 FINAL.
  * 4) 터치·진입(ACTION)은 시작 후 maxWaitMs 가 지나면 FINAL 을 찍어 그대로 확정한다. 다른 종류는 그냥 끝낸다.
- * 이벤트가 오면 1) 로 돌아간다. 화면 진입이면 조용해진 지 previewMs 뒤 미리 1장(PREVIEW)을 확보한다.
+ * 1) 의 기다리는 동안 이벤트가 오면 비교를 처음부터 다시 한다. 그 뒤의 이벤트는 화면 비교 결과에 맡긴다.
+ * 화면 진입이면 조용해진 지 previewMs 뒤(늦어도 ENTRY_PREVIEW_MAX_MS) 미리 1장(PREVIEW)을 확보한다.
  */
 class SettleCycle {
 
@@ -67,6 +69,9 @@ class SettleCycle {
     private var generation = 0
     private var startedAt = 0L
     private var lastActivity = 0L
+
+    /** 이 시각까지는 이벤트를 "아직 바뀌는 중"으로 보고 기다린다. 이후는 화면 비교만으로 판단한다. */
+    private var quietDeadline = 0L
     private var nextAt = 0L
     private var waiting = false
     private var previewWanted = false
@@ -81,24 +86,26 @@ class SettleCycle {
         if (current == null) {
             this.kind = kind
             startedAt = now
+            quietDeadline = now + CaptureConfig.SETTLE_MS + CaptureConfig.QUIET_WAIT_EXTRA_MS
             waiting = false
             nextAt = 0
             previewWanted = preview
+            generation++
+            clearRef()
         } else if (kind.ordinal < current.ordinal) {
             this.kind = kind
         }
         onActivity(now)
     }
 
-    /** 화면이 아직 바뀌는 중(이벤트). 비교를 처음부터 다시 한다. */
+    /** 화면이 아직 바뀌는 중(이벤트). 기다리는 동안이면 비교를 처음부터 다시 한다. */
     fun onActivity(now: Long) {
         if (kind == null) return
         if (now > lastActivity) lastActivity = now
+        if (now >= quietDeadline) return // 바쁜 앱: 이벤트 대신 화면 비교로 판단한다
         generation++
         waiting = false
-        ref = null
-        refMask = null
-        refStable = false
+        clearRef()
     }
 
     fun cancel() {
@@ -110,6 +117,8 @@ class SettleCycle {
     fun evaluate(now: Long, settleMs: Long, confirmMs: Long, maxWaitMs: Long, previewMs: Long = CaptureConfig.ENTRY_PREVIEW_MS): Decision {
         val k = kind ?: return Decision.Idle
         if (waiting) return Decision.Idle
+        // 강제로 찍을 시각을 넘기지 않는다(그 뒤의 이벤트가 강제 촬영 결과를 버리지 않게)
+        quietDeadline = startedAt + minOf(settleMs + CaptureConfig.QUIET_WAIT_EXTRA_MS, maxWaitMs)
         val forceAt = startedAt + maxWaitMs
         if (now >= forceAt) {
             if (k != Kind.ACTION) {
@@ -119,14 +128,14 @@ class SettleCycle {
             return take(Shot.FINAL, forced = true)
         }
         if (previewWanted) {
-            val previewAt = lastActivity + previewMs
+            val previewAt = minOf(lastActivity + previewMs, startedAt + CaptureConfig.ENTRY_PREVIEW_MAX_MS)
             if (now >= previewAt) {
                 previewWanted = false
                 return take(Shot.PREVIEW, forced = false)
             }
             return Decision.Wait(minOf(previewAt, forceAt))
         }
-        val readyAt = maxOf(lastActivity + settleMs, nextAt)
+        val readyAt = maxOf(minOf(lastActivity + settleMs, quietDeadline), nextAt)
         if (now < readyAt) return Decision.Wait(minOf(readyAt, forceAt))
         return take(if (ref != null && refStable) Shot.FINAL else Shot.PROBE, forced = false)
     }
@@ -135,6 +144,12 @@ class SettleCycle {
         waiting = true
         forcedShot = forced
         return Decision.Take(shot, generation)
+    }
+
+    private fun clearRef() {
+        ref = null
+        refMask = null
+        refStable = false
     }
 
     /** 촬영이 실패했다. 조금 뒤 다시 판단한다. */
@@ -146,7 +161,7 @@ class SettleCycle {
 
     /**
      * 촬영 결과. [mask] = 버튼이 찍힌 영역(PROBE), [last] = 이 화면에서 마지막으로 확보한 화면(없으면 null).
-     * [generation] 이 다르면(그 사이 이벤트·취소) 무시한다.
+     * [generation] 이 다르면(그 사이 이벤트·취소) 무시한다. 미리 확보(PREVIEW)는 그 사이 이벤트가 있어도 쓴다.
      */
     fun onShot(
         generation: Int,
@@ -157,8 +172,12 @@ class SettleCycle {
         now: Long,
         confirmMs: Long,
     ): Outcome {
-        val k = kind
-        if (generation != this.generation || k == null) return Outcome.Continue
+        val k = kind ?: return Outcome.Continue
+        if (shot == Shot.PREVIEW) {
+            if (generation == this.generation) waiting = false
+            return Outcome.Preview
+        }
+        if (generation != this.generation) return Outcome.Continue
         waiting = false
         when (shot) {
             Shot.PREVIEW -> return Outcome.Preview

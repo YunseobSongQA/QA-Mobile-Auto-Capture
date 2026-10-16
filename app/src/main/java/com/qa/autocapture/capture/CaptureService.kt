@@ -3,10 +3,12 @@ package com.qa.autocapture.capture
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
+import com.qa.autocapture.capture.policy.CaptureConfig
 import com.qa.autocapture.overlay.FloatingButton
 import com.qa.autocapture.session.SessionRecorder
 import com.qa.autocapture.session.SessionRecovery
@@ -81,7 +83,11 @@ class CaptureService : AccessibilityService() {
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                 if (recorder == null || tracker.isIgnored(pkg)) return
                 val screen = tracker.screenOf(pkg, event.windowId, c.current) ?: return
-                c.onScroll(screen, event.scrollDeltaX, event.scrollDeltaY)
+                if (isSmallScroller(event)) {
+                    c.onContentChanged() // 작은 영역(티커 등)의 스크롤은 이어붙일 대상이 아니다
+                } else {
+                    c.onScroll(screen, event.scrollDeltaX, event.scrollDeltaY)
+                }
             }
             AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
@@ -95,6 +101,17 @@ class CaptureService : AccessibilityService() {
     }
 
     override fun onInterrupt() = Unit
+
+    /** 스크롤한 뷰의 화면 높이가 SCROLL_MIN_HEIGHT_RATIO 보다 작은가. 모르면 false. */
+    private fun isSmallScroller(event: AccessibilityEvent): Boolean {
+        val node = event.source ?: return false
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        @Suppress("DEPRECATION")
+        node.recycle()
+        val screenHeight = resources.displayMetrics.heightPixels
+        return bounds.height() in 1 until (screenHeight * CaptureConfig.SCROLL_MIN_HEIGHT_RATIO).toInt()
+    }
 
     override fun onDestroy() {
         // 바로가기 등으로 서비스가 꺼지면 진행 중인 세션을 저장하고 끝낸다

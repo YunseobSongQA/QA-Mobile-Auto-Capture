@@ -14,6 +14,8 @@ class SettleCycleTest {
     private val confirm = CaptureConfig.CONFIRM_MS
     private val maxWait = CaptureConfig.MAX_WAIT_MS
     private val preview = CaptureConfig.ENTRY_PREVIEW_MS
+    private val previewMax = CaptureConfig.ENTRY_PREVIEW_MAX_MS
+    private val quietMax = settle + CaptureConfig.QUIET_WAIT_EXTRA_MS
     @Test
     fun `정적인 화면은 미리 1장 확보 뒤 바뀐 게 없으면 더 찍지 않는다`() {
         val r = cycle(Kind.ACTION, preview = true) { loaded }
@@ -33,11 +35,37 @@ class SettleCycleTest {
     }
 
     @Test
-    fun `이벤트가 이어지는 동안은 찍지 않는다`() {
-        val busy = (0L..5000L step 200).toList()
+    fun `이벤트가 잠깐 이어지면 조용해질 때까지 기다린다`() {
+        val events = (0L..800L step 200).toList()
+        val r = cycle(Kind.ACTION, preview = true, events = events) { loaded }
+        assertEquals(listOf("preview@${minOf(800 + preview, previewMax)}", "nochange@${minOf(800 + settle, quietMax)}"), r.outcomes)
+    }
+
+    @Test
+    fun `이벤트가 계속 오는 바쁜 앱도 SETTLE_MS + QUIET_WAIT_EXTRA_MS 뒤에는 화면 비교로 판단한다`() {
+        // 배너·타이머 때문에 화면이 멈춰 있어도 이벤트가 쉬지 않고 온다
+        val busy = (0L..20_000L step 100).toList()
         val r = cycle(Kind.ACTION, preview = true, events = busy) { loaded }
-        assertTrue(r.shots.all { it.first > 5000 })
-        assertEquals("preview@${5000 + preview}", r.outcomes.first())
+        assertEquals(listOf("preview@$previewMax", "nochange@$quietMax"), r.outcomes)
+    }
+
+    @Test
+    fun `바쁜 앱에서 로딩이 끝나면 다 뜬 화면을 확정한다`() {
+        val busy = (0L..20_000L step 100).toList()
+        val r = cycle(Kind.ACTION, preview = true, events = busy) { t -> if (t < 3000) spinner(t) else loaded }
+        val accept = r.accepted.single()
+        assertTrue("다 뜬 뒤 확인 간격 안에 확정: ${accept.at}", accept.at in 3000..3000 + 3 * confirm)
+        assertTrue(accept.cells.contentEquals(loaded))
+        assertFalse(accept.forced)
+    }
+
+    @Test
+    fun `바쁜 앱에서 끝내 정지하지 않아도 MAX_WAIT_MS 에 찍은 화면을 버리지 않는다`() {
+        val busy = (0L..20_000L step 50).toList()
+        val r = cycle(Kind.ACTION, events = busy) { t -> spinner(t) }
+        assertEquals(listOf(maxWait), r.accepted.map { it.at })
+        assertTrue(r.accepted.single().forced)
+        assertEquals("강제 촬영은 1번만", 1, r.shots.count { it.first >= maxWait })
     }
 
     @Test
@@ -95,7 +123,7 @@ class SettleCycleTest {
         c.onActivity(settle + 10)
         val outcome = c.onShot(take.generation, take.shot, thumb(errorShown), null, null, settle + 20, confirm)
         assertEquals(SettleCycle.Outcome.Continue, outcome)
-        assertEquals(SettleCycle.Decision.Wait(settle + 10 + settle), c.evaluate(settle + 30, settle, confirm, maxWait))
+        assertEquals(SettleCycle.Decision.Wait(minOf(settle + 10 + settle, quietMax)), c.evaluate(settle + 30, settle, confirm, maxWait))
     }
 
     // ── SettleCycle 시뮬레이터 ───────────────────────────────────
