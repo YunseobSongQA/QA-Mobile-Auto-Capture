@@ -25,8 +25,11 @@ QA 테스터는 목표 화면을 확인하면서 바뀐 점을 확인하고, 그
 
 - 언어: 대화·문서(DESIGN.md, README)·코드 주석·커밋 메시지는 한국어, 코드 식별자(변수·함수·클래스·파일명)는 영어.
 - 커밋 메시지에 Claude/AI 관련 표기를 넣지 않는다.
-- Kotlin, minSdk 30, targetSdk 35. 외부 라이브러리(AndroidX 포함) 추가 금지, 테스트용 JUnit 만.
-- 사용자가 켜는 권한은 접근성 서비스 하나. 포그라운드 서비스·알림·오버레이·저장소·네트워크 권한을 쓰지 않는다.
+- Kotlin, minSdk 26, targetSdk 35. 외부 라이브러리(AndroidX 포함) 추가 금지, 테스트용 JUnit 만.
+- API 30 이상 동작이 기준이다. API 26~29 지원 코드는 새 파일(`capture/projection/`, `storage/LegacyEvidenceStore`)에 두고,
+  기존 파일에는 `Build.VERSION.SDK_INT` 분기만 최소로 넣는다(API 30 이상 경로는 바꾸지 않는다).
+- API 30 이상: 사용자가 켜는 권한은 접근성 서비스 하나. 포그라운드 서비스·알림·오버레이·저장소·네트워크 권한을 쓰지 않는다.
+  API 26~29 만 예외로 화면 녹화(포그라운드 서비스 + 알림, 기록 시작마다 동의), API 26~28 은 저장공간 쓰기 권한(maxSdkVersion 28)을 쓴다.
 - 이름 고정: `capture/CaptureService`(바꾸면 덮어쓰기 설치 후 접근성 권한이 풀림), `capture/CaptureTileService`, `MainActivity`(최상위 패키지, 런처).
 - 코드 구조와 파일 규칙은 DESIGN.md 1·2장(패키지 = 기능, 파일 1개 = 클래스 1개, 순수 로직은 JVM 테스트).
 - 동작을 바꾸면 DESIGN.md·README·테스트를 함께 고친다. `./gradlew testDebugUnitTest` 가 통과한 뒤 커밋한다.

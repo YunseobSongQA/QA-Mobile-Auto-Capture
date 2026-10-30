@@ -14,7 +14,7 @@ android {
 
     defaultConfig {
         applicationId = "com.qa.autocapture"
-        minSdk = 30
+        minSdk = 26
         targetSdk = 35
         versionCode = runNumber
         versionName = "1.0.$runNumber"

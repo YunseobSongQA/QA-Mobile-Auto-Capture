@@ -4,11 +4,13 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
 import com.qa.autocapture.MainActivity
+import com.qa.autocapture.capture.projection.ProjectionCapture
 import com.qa.autocapture.overlay.FloatingButton
 import com.qa.autocapture.session.SessionRecorder
 import com.qa.autocapture.session.SessionRecovery
@@ -80,6 +82,8 @@ class CaptureService : AccessibilityService() {
                 if (recorder == null || tracker.isIgnored(pkg)) return
                 val screen = tracker.screenOf(pkg, event.windowId, c.current) ?: return
                 // 작은 영역(티커 등)의 스크롤은 이어붙일 대상이 아니다
+                // API 26~27 에는 이동량이 없다(-1 = 모름)
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) { if (!isSmallScroller(event)) c.onScroll(screen, -1, -1); return }
                 if (!isSmallScroller(event)) c.onScroll(screen, event.scrollDeltaX, event.scrollDeltaY)
             }
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
@@ -152,6 +156,8 @@ class CaptureService : AccessibilityService() {
 
     private fun startSession() {
         if (!enabled) return
+        // API 26~29: 화면 녹화 동의를 받고 녹화가 준비되면 다시 부른다
+        if (ProjectionCapture.requestIfNeeded(this) { startSession(); recorder != null }) return
         val button = overlay ?: return
         val c = controller ?: return
         tracker.refreshIgnoredPackages()
@@ -179,6 +185,7 @@ class CaptureService : AccessibilityService() {
     private fun stopSession(reason: String) {
         val rec = recorder ?: return
         controller?.stop()
+        ProjectionCapture.stop(this) // API 26~29 만
         recorder = null
         CaptureStatus.recordingScreens = null
         debugLog?.let {

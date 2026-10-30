@@ -9,6 +9,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
 import android.graphics.drawable.RippleDrawable
 import android.graphics.drawable.StateListDrawable
+import android.os.Build
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
@@ -244,7 +245,7 @@ class Ui(private val activity: Activity) {
         root.addView(appBar, LinearLayout.LayoutParams(MATCH, WRAP))
         root.addView(body, LinearLayout.LayoutParams(MATCH, 0, 1f))
         if (body is ViewGroup) body.clipToPadding = false
-        root.setOnApplyWindowInsetsListener { v, insets ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) root.setOnApplyWindowInsetsListener { v, insets ->
             val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             v.setPadding(bars.left, bars.top, bars.right, 0)
             body.setPadding(body.paddingLeft, body.paddingTop, body.paddingRight, bars.bottom)
@@ -272,7 +273,7 @@ class Ui(private val activity: Activity) {
     companion object {
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
         const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
-        private val MEDIUM: Typeface = Typeface.create(Typeface.DEFAULT, 500, false)
+        private val MEDIUM: Typeface = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) Typeface.create(Typeface.DEFAULT, 500, false) else Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
         fun withAlpha(colorInt: Int, alpha: Float) = (colorInt and 0x00FFFFFF) or ((alpha * 255).toInt() shl 24)
     }

@@ -256,7 +256,7 @@ class ImageViewerActivity : Activity() {
 
         /** MediaStore 이미지 URI. 이미지 컬렉션 URI 라야 갤러리 앱이 받는다. */
         fun imageUri(file: StoredFile): Uri =
-            ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), ContentUris.parseId(file.uri))
+            ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.VOLUME_EXTERNAL_PRIMARY else "external"), ContentUris.parseId(file.uri))
 
         /** [name] 사진부터 연다. */
         fun intent(context: Context, sessionId: String, name: String): Intent =

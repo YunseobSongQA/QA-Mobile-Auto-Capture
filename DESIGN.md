@@ -17,7 +17,7 @@
 판단이 애매하면 "보고서에 그대로 붙일 수 있는 사진인가, 테스터의 시간을 줄이는가"로 정한다.
 
 - 대상 기기: Galaxy S21 / Android 15 (One UI 7) / 1080x2400
-- Kotlin, minSdk 30, targetSdk 35 (compileSdk 35)
+- Kotlin, minSdk 26, targetSdk 35 (compileSdk 35). API 30 이상이 기준이고 API 26~29 는 0-5 의 방식으로 찍는다.
 - 런타임 외부 라이브러리 **0개** (AndroidX도 쓰지 않음). 테스트 전용으로 JUnit 4만 사용.
 - 빌드: Gradle Wrapper(9.7.1) + AGP 9.4.1(내장 Kotlin), JDK 21. Android Studio 불필요.
 
@@ -80,6 +80,20 @@ PNG도 이미지로 색인되므로 갤러리 앱에 앨범으로 보인다. 경
 | PNG 직접 인코딩 | 이어붙인 이미지는 순수 Kotlin 스트리밍 인코더로 행 단위 기록 | 메모리 |
 | 공유 | zip 을 MediaStore 에 저장하고 그 URI 로 공유(FileProvider 없이) | |
 
+### 0-5. API 26~29 지원 (Android 8.0~10)
+
+API 30 이상의 동작은 그대로 두고, 26~29 에서만 다른 길로 간다. 26~29 코드는 새 파일에 두고 기존 파일에는 `SDK_INT` 분기만 넣었다.
+
+| 다른 점 | API 26~29 에서 | 파일 |
+|---|---|---|
+| 화면 캡처 | 접근성 `takeScreenshot`(30) 대신 화면 녹화(MediaProjection). 기록을 시작할 때 1회 동의 → 포그라운드 서비스(알림 "QA 증적 기록 중")가 화면을 비추는 가상 디스플레이를 ImageReader 로 받고, 찍을 때 가장 최근 화면 1장을 Bitmap 으로. 기록을 멈추면 녹화·알림도 끝 | `capture/projection/ProjectionCapture`·`ProjectionService`·`ProjectionConsentActivity`, 분기: `ScreenshotTaker.takeShot`, `CaptureService.startSession/stopSession` |
+| 저장 (26~28) | MediaStore `RELATIVE_PATH`(29)가 없어 저장공간 쓰기 권한으로 `Documents/QAEvidence/` 에 직접 쓰고 MediaStore 에 경로로 등록(같은 content URI 로 목록·갤러리·공유). 권한은 기록 시작 때 동의 화면이 먼저 묻는다 | `storage/LegacyEvidenceStore`, 분기: `EvidenceStore` 각 메서드 첫 줄 |
+| 스크롤 이동량 (26~27) | `scrollDeltaY`(28)가 없어 -1(모름)로 넘긴다 → 길게 스크롤하면 0.45초마다 1장(1차와 같음) | `CaptureService`, `DebugLog` |
+| 화면 | 굵은 글꼴·시스템바 여백·타일 부제목·썸네일·갤러리 URI 를 이 버전 API 로 | `Ui`, `CaptureTileService`, `SessionActivity`, `ImageViewerActivity`, `SessionStore`(versionCode) |
+| 안내 | 설정 안내에 저장공간 권한(26~28), 화면 녹화 허용 안내 단계 추가. 개인정보 카드 권한 문구 | `SetupGuideCard`, `PrivacyCard` |
+
+동의 화면과 녹화 서비스는 `@bool/projection_capture`(values-v30 에서 false)로 API 30 이상에서 꺼 두고, 권한은 `maxSdkVersion` 으로 API 30 이상에 없다.
+
 ---
 
 ## 1. 코드 구조
@@ -112,7 +126,11 @@ app/src/main/java/com/qa/autocapture/
 │   ├── CaptureStatus.kt                메인 화면·타일이 보는 서비스 상태
 │   ├── DebugLog.kt                     디버그 로그(받은 이벤트·판단 기록)
 │   ├── CaptureTileService.kt           빠른 설정 타일(일시정지/재개)
-│   └── CaptureConfig.kt                캡처 상수 전부
+│   ├── CaptureConfig.kt                캡처 상수 전부
+│   └── projection/                     API 26~29 전용: 화면 녹화로 찍기(0-5)
+│       ├── ProjectionCapture.kt            기록 시작 때 동의 요청, 찍기, 녹화 종료
+│       ├── ProjectionService.kt            포그라운드 서비스 + 알림, 가상 디스플레이 → 가장 최근 화면
+│       └── ProjectionConsentActivity.kt    투명 화면: 저장공간 권한(26~28), 화면 녹화 동의
 ├── session/                        기록 — 찍은 화면을 세션·이미지로
 │   ├── SessionRecorder.kt              세션 1개: 화면 방문마다 사진 묶음, manifest·세션 로그
 │   ├── GroupSaver.kt                   화면 상태 1개의 프레임 → 이어붙인 이미지 저장
@@ -125,6 +143,7 @@ app/src/main/java/com/qa/autocapture/
 ├── storage/                        파일 — 어디에 어떻게 쓰는지
 │   ├── StoragePaths.kt                 저장 위치·파일 이름 규칙
 │   ├── EvidenceStore.kt                결과물 파일(MediaStore): 저장·목록·읽기·zip
+│   ├── LegacyEvidenceStore.kt          API 26~28 결과물 파일: 직접 쓰고 MediaStore 에 경로로 등록
 │   ├── SessionStore.kt                 session.json·manifest.json 읽기·쓰기
 │   ├── SessionData.kt                  기록 모델(세션·화면·이미지·토스트)
 │   ├── FrameStore.kt                   임시 프레임 폴더
@@ -172,7 +191,7 @@ CaptureService.onAccessibilityEvent
 | 계층 | 파일 | Android 의존 |
 |---|---|---|
 | 판단(순수) | `stitch/Stitcher`, `stitch/PngWriter`, `stitch/PartRenderer` | 없음 → JVM 테스트 |
-| 서비스 | `capture/*` | AccessibilityService, takeScreenshot |
+| 서비스 | `capture/*` | AccessibilityService, takeScreenshot (API 26~29 는 MediaProjection) |
 | 기록 | `session/*` | Bitmap, 스레드 |
 | 저장 | `storage/*` | MediaStore, 파일, SharedPreferences |
 | 화면 | `ui/*`, `overlay/*` | View |
@@ -475,10 +494,10 @@ manifest 의 `frames` = 그 이미지에 쓰인 프레임 수(2 이상이면 스
 
 ## 7. 권한과 개인정보
 
-- 사용자가 켜는 권한: **접근성 서비스 1개**뿐.
-- Manifest 권한 선언 없음. 네트워크 권한(INTERNET, ACCESS_NETWORK_STATE)은 `tools:node="remove"` 로 명시 제거하고, CI 에서 APK 권한에 네트워크 권한이 있으면 배포를 멈춘다.
+- 사용자가 켜는 권한: **접근성 서비스 1개**뿐(API 30 이상). API 26~29 는 기록 시작마다 화면 녹화 동의, 26~28 은 저장공간 권한도(0-5).
+- API 30 이상은 Manifest 권한 선언 없음(`FOREGROUND_SERVICE` maxSdkVersion 29, `WRITE_EXTERNAL_STORAGE` maxSdkVersion 28 만 선언). 네트워크 권한(INTERNET, ACCESS_NETWORK_STATE)은 `tools:node="remove"` 로 명시 제거하고, CI 에서 APK 권한에 네트워크 권한이 있으면 배포를 멈춘다.
 - `<queries>` 로 HOME 인텐트와 IME 인텐트만 조회(권한 아님). 타일 서비스의 `BIND_QUICK_SETTINGS_TILE` 은 시스템이 바인딩할 때 쓰는 보호 권한이다.
-- 쓰지 않음: 포그라운드 서비스, 알림, `SYSTEM_ALERT_WINDOW`, 저장소 권한, `QUERY_ALL_PACKAGES`, 네트워크.
+- 쓰지 않음: 포그라운드 서비스, 알림, `SYSTEM_ALERT_WINDOW`, 저장소 권한, `QUERY_ALL_PACKAGES`, 네트워크(포그라운드 서비스·알림·저장소 권한은 API 26~29 만 예외).
 - 접근성으로 읽는 것: 화면 전환·스크롤 이벤트(패키지, 클래스, 창 ID, 시각), 토스트 문구, 진입 사진 직전 로딩 표시가 있는지, 기록 중 화면 캡처.
   화면 글자 내용은 디버그 로그를 켠 경우에만 기록한다.
   같은 내용을 메인 화면 "개인정보 및 권한"과 접근성 서비스 설명(`service_description`)에 적었다.
@@ -513,6 +532,8 @@ manifest 의 `frames` = 그 이미지에 쓰인 프레임 수(2 이상이면 스
 
 ## 10. 알려진 한계
 
+- API 26~29: 기록할 때마다 화면 녹화 동의 창이 뜨고, 녹화하는 동안 상태바에 시스템의 화면 녹화(전송) 아이콘이 보여 사진 상단에 찍힐 수 있다.
+  API 26 은 내비게이션바 밝은 아이콘(API 27)이 없어 밝은 테마에서 내비게이션바 버튼이 잘 안 보일 수 있다.
 - `FLAG_SECURE` 화면, 동영상/애니메이션 최적화는 범위 밖이다. 기본 디스플레이만 캡처한다(DeX/멀티 디스플레이 제외).
 - **찍는 때는 화면 진입과 스크롤뿐이다**(1차 방식): 같은 화면 안에서 누른 뒤 바뀐 결과(오류 문구, 펼친 내용)는 창이 바뀌거나
   스크롤할 때 함께 찍힌다. 창이 바뀌지 않고 스크롤도 하지 않으면 남지 않는다.

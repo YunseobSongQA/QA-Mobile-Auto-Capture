@@ -1,6 +1,7 @@
 package com.qa.autocapture.capture
 
 import android.content.Context
+import android.os.Build
 import android.view.accessibility.AccessibilityEvent
 import com.qa.autocapture.storage.StoragePaths
 import com.qa.autocapture.storage.TextLog
@@ -27,7 +28,7 @@ class DebugLog(context: Context, sessionId: String) {
             when (e.eventType) {
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED, AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ->
                     append(" change=").append(e.contentChangeTypes)
-                AccessibilityEvent.TYPE_VIEW_SCROLLED -> append(" dx=").append(e.scrollDeltaX).append(" dy=").append(e.scrollDeltaY)
+                AccessibilityEvent.TYPE_VIEW_SCROLLED -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) append(" dx=").append(e.scrollDeltaX).append(" dy=").append(e.scrollDeltaY)
             }
         }
         val type = AccessibilityEvent.eventTypeToString(e.eventType)

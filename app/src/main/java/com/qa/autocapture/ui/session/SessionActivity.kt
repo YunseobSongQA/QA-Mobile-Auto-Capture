@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -261,6 +262,7 @@ class SessionActivity : Activity() {
 
     /** MediaProvider 썸네일을 쓰고, 안 되면 직접 줄여 읽는다. */
     private fun loadThumb(file: StoredFile, px: Int): Bitmap? = try {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) error("API 26~28 은 직접 줄여 읽는다")
         contentResolver.loadThumbnail(ImageViewerActivity.imageUri(file), Size(px * 2, px * 2), null)
     } catch (e: Exception) {
         runCatching {

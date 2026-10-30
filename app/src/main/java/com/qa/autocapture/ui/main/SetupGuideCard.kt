@@ -1,8 +1,11 @@
 package com.qa.autocapture.ui.main
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
@@ -22,6 +25,7 @@ import com.qa.autocapture.ui.common.Ui.Type
  * 단계마다 구체적인 메뉴 경로와 해당 설정 화면으로 바로 가는 버튼이 있다.
  * ①~③은 접근성 서비스가 켜지면 완료(제한된 설정을 직접 확인하는 공개 API 가 없음), ④는 배터리 최적화 제외 여부로 판단한다.
  * 미완료면 펼치고 모두 완료면 접는다(제목 줄을 눌러 직접 바꿀 수 있음).
+ * API 26~29 에서만 ⑤ 저장공간 권한(API 26~28), 화면 녹화 안내 단계가 더 붙는다(API 30 이상은 4단계 그대로).
  */
 class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
 
@@ -104,6 +108,31 @@ class SetupGuideCard(private val activity: Activity, private val ui: Ui) {
                 "서비스가 중간에 꺼지지 않게 합니다.",
             listOf("앱 정보 열기" to appInfo),
         ) { activity.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(activity.packageName) == true }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) addLegacySteps(appInfo, serviceOn)
+    }
+
+    /** API 26~29 에서만 필요한 단계. 이 버전은 화면을 화면 녹화(MediaProjection)로 찍는다. */
+    private fun addLegacySteps(appInfo: () -> Unit, serviceOn: () -> Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            addStep(
+                steps.size + 1,
+                "저장공간 권한 허용",
+                "[권한 허용] → [허용]을 누릅니다. Android 9 이하에서는 증적을 내장 저장공간/Documents/QAEvidence 에 저장하려면 이 권한이 필요합니다. " +
+                    "허용 창이 뜨지 않으면 [앱 정보 열기] → 권한 → 저장공간을 허용합니다.",
+                listOf(
+                    "권한 허용" to { activity.requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 0) },
+                    "앱 정보 열기" to appInfo,
+                ),
+            ) { activity.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED }
+        }
+        addStep(
+            steps.size + 1,
+            "기록을 시작할 때 화면 녹화 허용",
+            "Android 10 이하에서는 화면 녹화 기능으로 화면을 찍습니다. [● 시작]을 누르면 화면 녹화(전송)를 시작할지 묻는 창이 뜹니다. " +
+                "[지금 시작]을 누르면 기록이 시작됩니다. 기록할 때마다 한 번 묻고, 기록하는 동안 알림창에 \"QA 증적 기록 중\" 알림이 있습니다.",
+            emptyList(),
+            serviceOn,
+        )
     }
 
     fun refresh() {

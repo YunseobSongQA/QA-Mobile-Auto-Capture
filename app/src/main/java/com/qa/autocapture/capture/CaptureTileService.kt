@@ -39,7 +39,7 @@ class CaptureTileService : TileService() {
         val serviceOn = CaptureStatus.isServiceEnabled(this)
         val on = Options(this).captureEnabled
         tile.state = if (serviceOn && on) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
-        tile.subtitle = when {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) tile.subtitle = when {
             !serviceOn -> "서비스 꺼짐"
             !on -> "일시정지"
             CaptureStatus.recordingScreens != null -> "기록 중"

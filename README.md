@@ -10,8 +10,8 @@
 테스터는 평소처럼 앱을 쓰고 스크롤만 하면 됩니다.
 증적은 이 기기 안에만 저장되고, 앱에 네트워크 권한이 없어 외부로 전송되지 않습니다.
 
-- 기준 기기: Galaxy S21 / Android 15 (One UI 7) / 1080x2400 (Android 11 이상에서 동작)
-- 사용자가 켜야 하는 권한: **접근성 서비스 1개** (네트워크 권한 없음)
+- 기준 기기: Galaxy S21 / Android 15 (One UI 7) / 1080x2400 (Android 8.0 이상에서 동작, Android 10 이하는 1-7 절 참고)
+- 사용자가 켜야 하는 권한: **접근성 서비스 1개** (네트워크 권한 없음, Android 10 이하는 화면 녹화 동의가 더 필요)
 - 설계 문서: [DESIGN.md](DESIGN.md)
 
 **APK 고정 다운로드 주소**
@@ -96,6 +96,16 @@ Android 13 이상에서는 브라우저로 받은 앱이 접근성 서비스를 
 1. **설정 → 애플리케이션 → QA 증적 캡처 → 배터리 → 제한 없음**을 고릅니다.
 2. 같은 앱 정보 화면으로 돌아와 **사용하지 않는 앱 관리**를 끕니다(오래 안 쓰면 권한을 회수하거나 앱을 멈추는 기능).
 3. **설정 → 배터리 → 백그라운드 사용 제한**에 들어가, **절전 상태 앱**과 **초절전 상태 앱** 목록에 QA 증적 캡처가 없는지 확인합니다.
+
+### 1-7. Android 8.0~10 기기
+
+Android 10 이하에는 접근성 스크린샷 기능이 없어 **화면 녹화 기능으로 화면을 찍습니다.** 앱 메인 화면의 설정 안내에 이 버전에서만 필요한 단계가 더 나옵니다.
+
+1. (Android 9 이하) **저장공간 권한**: 설정 안내의 [권한 허용] → [허용]. 증적을 `Documents/QAEvidence`에 저장하는 데 씁니다.
+2. **기록을 시작할 때마다** [● 시작]을 누르면 화면 녹화(전송)를 시작할지 묻는 창이 뜹니다. **[지금 시작]**을 누르면 기록이 시작됩니다.
+3. 기록하는 동안 알림창에 **"QA 증적 기록 중"** 알림이 있습니다. 버튼으로 정지하면 알림도 사라집니다.
+4. Android 8.0~8.1 은 스크롤 이동량을 알 수 없어, 길게 스크롤하면 0.45초마다 1장을 찍어 이어붙입니다.
+5. 녹화하는 동안 상태바에 시스템의 화면 녹화 아이콘이 보여 사진 맨 위에 찍힐 수 있습니다.
 
 ---
 
@@ -197,6 +207,7 @@ Android 13 이상에서는 브라우저로 받은 앱이 접근성 서비스를 
 - [ ] 업데이트 후 서비스가 꺼졌을 때 설정 안내 카드가 펼쳐지고, 접근성 → 설치된 앱 → QA 증적 캡처 누르기 → 제한된 설정 허용 순서대로 하면 1~4단계가 체크되며 카드가 접힌다.
 - [ ] 빠른 설정 타일·메인 스위치로 일시정지하면 버튼이 사라지고 캡처가 멈추며, 재부팅 후에도 상태가 유지된다.
 - [ ] 30분 연속 사용해도 앱이 죽지 않는다.
+- [ ] (Android 8.0~10) [● 시작]을 누르면 (9 이하는 저장공간 권한 →) 화면 녹화 동의 창이 뜨고, [지금 시작] 뒤 현재 화면부터 기록되며, 정지하면 알림이 사라진다.
 
 ---
 
@@ -289,11 +300,11 @@ app/src/main/java/com/qa/autocapture/
 ├── capture/      접근성 서비스 — 언제 무엇을 찍을지
 │   │             CaptureService(진입점) · CaptureController(찍을 때 판단) · ScreenshotTaker(촬영 큐)
 │   │             ScreenTracker(화면 식별) · CaptureStatus(상태 공유) · DebugLog · CaptureTileService(빠른 설정 타일)
-│                 CaptureConfig(상수 전부)
+│                 CaptureConfig(상수 전부) · projection/(Android 8.0~10 화면 녹화 캡처)
 ├── session/      기록: SessionRecorder(세션 1개) · GroupSaver(프레임 → 이어붙인 이미지) · SessionRecovery · SessionThreads
 ├── stitch/       순수 로직: Stitcher(겹침·고정 영역·합성 계획) · PartRenderer · PngWriter
 ├── storage/      파일: StoragePaths(경로·이름 규칙) · EvidenceStore(MediaStore) · SessionStore(manifest) · SessionData(모델)
-│                 FrameStore·FrameReader(임시 프레임) · TextLog(로그) · Options(설정값) · Times
+│                 FrameStore·FrameReader(임시 프레임) · TextLog(로그) · Options(설정값) · Times · LegacyEvidenceStore(Android 8.0~9 저장)
 ├── overlay/      FloatingButton(플로팅 버튼)
 └── ui/           common/Ui(공통 뷰) · main/(메인 화면 카드: StatusCard·SetupGuideCard·SessionListCard·PrivacyCard)
                   session/SessionActivity · viewer/(ImageViewerActivity 사진 보기 · PagerView) · settings/SettingsActivity
@@ -309,6 +320,7 @@ app/src/main/java/com/qa/autocapture/
 - 접근성으로 읽는 것: 화면 전환·스크롤·내용 변경 알림(앱 이름, 화면 이름), 토스트 문구, 기록 중일 때의 화면 캡처. 화면의 글자 내용은 디버그 로그를 켠 경우에만 기록합니다.
 - 저장 위치: 이 기기의 `내장 저장공간/Documents/QAEvidence`. 기록 중일 때만 저장합니다.
 - 포그라운드 서비스, 알림, 다른 앱 위에 표시(오버레이), 저장소 권한을 쓰지 않습니다.
+  단, Android 10 이하는 화면 녹화를 위해 기록하는 동안 포그라운드 서비스와 알림을, Android 9 이하는 저장공간 권한을 씁니다.
 
 ## 5. 알려진 한계
 

@@ -4,6 +4,7 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import java.io.BufferedOutputStream
@@ -25,11 +26,15 @@ class EvidenceStore(context: Context) {
     private val resolver = context.applicationContext.contentResolver
     private val collection: Uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
+    /** API 26~28 이면 이 버전용 저장소로 넘긴다(MediaStore RELATIVE_PATH 가 API 29부터). */
+    private val legacy = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) LegacyEvidenceStore(context) else null
+
     /** [overwrite] 한 파일의 URI. 쓸 때마다 다시 조회하지 않게 기억한다. */
     private val overwriteUris = HashMap<String, Uri>()
 
     /** 새 파일을 만들고 [write] 로 내용을 쓴다. 실패하면 만든 항목을 지운다. */
     fun saveFile(relativePath: String, name: String, mime: String, write: (OutputStream) -> Unit): Uri {
+        legacy?.let { return it.saveFile(relativePath, name, mime, write) }
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, mime)
@@ -50,6 +55,7 @@ class EvidenceStore(context: Context) {
 
     /** 파일 내용을 통째로 바꾼다(manifest.json). 없거나 지워졌으면 새로 만든다. */
     fun overwrite(relativePath: String, name: String, mime: String, bytes: ByteArray) {
+        legacy?.let { return it.overwrite(relativePath, name, mime, bytes) }
         val key = relativePath + name
         val existing = overwriteUris[key] ?: findFile(relativePath, name)
         if (existing != null) {
@@ -69,6 +75,7 @@ class EvidenceStore(context: Context) {
 
     /** 계속 덧붙여 쓸 파일을 만든다(세션 로그, 디버그 로그). 스트림은 호출자가 닫는다. */
     fun createStream(relativePath: String, name: String, mime: String): OutputStream {
+        legacy?.let { return it.createStream(relativePath, name, mime) }
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, mime)
@@ -81,7 +88,7 @@ class EvidenceStore(context: Context) {
         }
     }
 
-    fun findFile(relativePath: String, name: String): Uri? = resolver.query(
+    fun findFile(relativePath: String, name: String): Uri? = if (legacy != null) legacy.findFile(relativePath, name) else resolver.query(
         collection,
         arrayOf(MediaStore.MediaColumns._ID),
         "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
@@ -91,6 +98,7 @@ class EvidenceStore(context: Context) {
 
     /** 세션 폴더의 내 파일(이미지, manifest.json, session_log.txt)을 이름순으로. */
     fun listFiles(sessionId: String): List<StoredFile> {
+        legacy?.let { return it.listFiles(sessionId) }
         val out = ArrayList<StoredFile>()
         resolver.query(
             collection,

@@ -3,7 +3,7 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-      권한 선언 없음. 네트워크 권한은 라이브러리가 끼워 넣지 못하게 명시적으로 제거한다
+      API 30 이상은 권한 선언 없음. 네트워크 권한은 라이브러리가 끼워 넣지 못하게 명시적으로 제거한다
       (외부 전송 없음 보장, CI 에서도 APK 권한을 확인한다).
     -->
     <uses-permission
@@ -12,6 +12,17 @@
     <uses-permission
         android:name="android.permission.ACCESS_NETWORK_STATE"
         tools:node="remove" />
+
+    <!--
+      API 26~29 전용(capture/projection). 이 버전에는 접근성 takeScreenshot(API 30)이 없어 화면 녹화로 찍는다.
+      maxSdkVersion 때문에 API 30 이상에서는 이 권한들이 없다(지금과 같음).
+    -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"
+        android:maxSdkVersion="29" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- 런처와 IME 패키지를 무시 목록에 넣기 위한 조회만 선언한다. -->
     <queries>
@@ -66,6 +77,23 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- API 26~29 화면 녹화: 기록 시작 때 동의 화면, 기록 중 포그라운드 서비스. API 30 이상은 꺼 둔다(values-v30/bools.xml). -->
+        <activity
+            android:name=".capture.projection.ProjectionConsentActivity"
+            android:enabled="@bool/projection_capture"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <service
+            android:name=".capture.projection.ProjectionService"
+            android:enabled="@bool/projection_capture"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
+            tools:ignore="ForegroundServicePermission" />
 
         <!-- 알림창 빠른 설정 타일: 캡처 일시정지/재개. BIND_QUICK_SETTINGS_TILE 은 시스템만 가진 권한(앱이 요청하는 권한 아님). -->
         <service

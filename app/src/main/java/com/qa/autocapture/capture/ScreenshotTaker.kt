@@ -2,10 +2,12 @@ package com.qa.autocapture.capture
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Handler
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
+import com.qa.autocapture.capture.projection.ProjectionCapture
 import com.qa.autocapture.overlay.FloatingButton
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -125,6 +127,11 @@ class ScreenshotTaker(
         }
         inFlight = true
         lastShotAt = SystemClock.uptimeMillis()
+        // API 26~29: takeScreenshot(API 30)이 없어 화면 녹화로 찍는다
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            ProjectionCapture.take { bitmap -> finishShot(); if (bitmap != null) callback.onCaptured(s, bitmap) else callback.onShotFailed(s, false); pumpShot() }
+            return
+        }
         service.takeScreenshot(
             Display.DEFAULT_DISPLAY,
             service.mainExecutor,

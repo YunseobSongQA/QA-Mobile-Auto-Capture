@@ -129,7 +129,7 @@ class SessionStore(context: Context) {
                     .put("android", Build.VERSION.RELEASE)
                     .put("sdk", Build.VERSION.SDK_INT),
             )
-            .put("app", JSONObject().put("versionName", info.versionName).put("versionCode", info.longVersionCode))
+            .put("app", JSONObject().put("versionName", info.versionName).put("versionCode", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()))
             .put("screens", screens)
             .put("toasts", toasts)
     }
